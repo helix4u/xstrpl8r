@@ -163,7 +163,7 @@ async function analyzeTweet(tweetText, userInfo, modelName) {
     throw new Error('OpenAI client not initialized');
   }
 
-  const prompt = `Analyze this tweet for toxicity and bot likelihood:
+  const prompt = `Analyze this tweet for toxicity and bot likelihood. Be conservative and only flag genuine concerns:
 
 Tweet: "${tweetText}"
 User: @${userInfo.username} (${userInfo.displayName})
@@ -171,13 +171,23 @@ Followers: ${userInfo.followersCount}
 Following: ${userInfo.followingCount}
 Account Age: ${userInfo.accountAge} days
 
+IMPORTANT: Only flag accounts as suspicious if there are clear indicators of bot behavior or toxicity.
+Don't flag normal accounts based on follower counts or account age alone.
+
 Provide a JSON response with:
 {
   "toxicity_score": 0-10,
   "bot_likelihood": 0-10,
   "analysis": "brief explanation",
-  "red_flags": ["list", "of", "flags"]
+  "red_flags": ["list", "of", "genuine", "flags"]
 }
+
+Only include red flags for:
+- Clear toxicity or hate speech
+- Obvious spam or promotional content
+- Suspicious patterns (excessive hashtags, repetitive content)
+- Bot-like behavior (no personal engagement, generic responses)
+
 Return only the JSON object with double-quoted keys and numeric values.`;
 
   if (!openai.chat || !openai.chat.completions || typeof openai.chat.completions.create !== 'function') {

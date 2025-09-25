@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      width: 400px;
+      padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    label {
+      font-weight: 600;
+      color: #333;
+    }
+    input, textarea {
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    button {
+      background: #1da1f2;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    button:hover {
+      background: #0d8bd9;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    .status {
+      padding: 10px;
+      border-radius: 4px;
+      margin-top: 10px;
+      font-size: 14px;
+    }
+    .status.success {
+      background: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+    }
+    .status.error {
+      background: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+    }
+    .status.info {
+      background: #d1ecf1;
+      color: #0c5460;
+      border: 1px solid #bee5eb;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 15px;
+    }
+    .stat-item {
+      text-align: center;
+      padding: 10px;
+      background: #f8f9fa;
+      border-radius: 4px;
+    }
+    .stat-number {
+      font-size: 20px;
+      font-weight: bold;
+      color: #1da1f2;
+    }
+    .stat-label {
+      font-size: 12px;
+      color: #666;
+    }
+    .query-section {
+      margin-top: 20px;
+      padding-top: 20px;
+      border-top: 1px solid #eee;
+    }
+    .query-input {
+      width: 100%;
+      min-height: 60px;
+      resize: vertical;
+    }
+    .query-results {
+      margin-top: 10px;
+      max-height: 200px;
+      overflow-y: auto;
+      background: #f8f9fa;
+      padding: 10px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>X.com AI Analyzer</h2>
+    
+    <div class="form-group">
+      <label for="apiKey">API Key:</label>
+      <input type="password" id="apiKey" placeholder="Enter your API key">
+    </div>
+    
+    <div class="form-group">
+      <label for="completionsUrl">Completions URL:</label>
+      <input type="url" id="completionsUrl" placeholder="https://api.openai.com/v1/chat/completions">
+    </div>
+    
+    <div class="form-group">
+      <label for="model">Model:</label>
+      <input type="text" id="model" placeholder="gpt-4.1-mini" value="gpt-4.1-mini">
+    </div>
+    
+    <button id="saveConfig">Save Configuration</button>
+    <button id="startAnalysis" disabled>Start Analysis</button>
+    
+    <div id="status" class="status" style="display: none;"></div>
+    
+    <div class="stats">
+      <div class="stat-item">
+        <div class="stat-number" id="tweetsProcessed">0</div>
+        <div class="stat-label">Tweets Processed</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-number" id="accountsAnalyzed">0</div>
+        <div class="stat-label">Accounts Analyzed</div>
+      </div>
+    </div>
+    
+    <div class="query-section">
+      <h3>Ask Questions</h3>
+      <textarea id="queryInput" class="query-input" placeholder="Ask questions about the tweets you've seen..."></textarea>
+      <button id="askQuestion">Ask Question</button>
+      <div id="queryResults" class="query-results" style="display: none;"></div>
+    </div>
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>

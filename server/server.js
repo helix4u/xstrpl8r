@@ -1,0 +1,411 @@
+const express = require('express');
+const cors = require('cors');
+const { ChromaClient } = require('chromadb');
+const OpenAI = require('openai');
+const axios = require('axios');
+
+const app = express();
+const PORT = 3001;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Initialize ChromaDB in embedded mode
+
+let chroma = null;
+let collection = null;
+let openai = null;
+let openaiConfig = { apiKey: null, baseURL: null };
+
+function sanitizeBaseURL(baseURL) {
+  const defaultBase = 'https://api.openai.com/v1';
+  if (!baseURL || typeof baseURL !== 'string') {
+    return defaultBase;
+  }
+
+  const ensureScheme = (value) => {
+    if (/^https?:\/\//i.test(value)) {
+      return value;
+    }
+    return `https://${value}`;
+  };
+
+  const trimSuffixes = (inputPath) => {
+    let cleaned = (inputPath || '').replace(/\/+$/, '');
+    const lower = cleaned.toLowerCase();
+    const suffixes = [
+      '/v1/chat/completions',
+      '/chat/completions',
+      '/v1/completions',
+      '/completions'
+    ];
+    for (const suffix of suffixes) {
+      if (lower.endsWith(suffix)) {
+        cleaned = cleaned.slice(0, -suffix.length);
+        break;
+      }
+    }
+    return cleaned;
+  };
+
+  try {
+    const url = new URL(ensureScheme(baseURL.trim()));
+    const trimmedPath = trimSuffixes(url.pathname);
+    url.pathname = trimmedPath || '';
+    url.search = '';
+    url.hash = '';
+
+    let normalized = url.toString().replace(/\/+$/, '');
+    if (!normalized.toLowerCase().endsWith('/v1')) {
+      normalized = `${normalized}/v1`;
+    }
+    return normalized;
+  } catch (error) {
+    const fallback = ensureScheme(baseURL.trim());
+    if (!/^https?:\/\//i.test(fallback)) {
+      return defaultBase;
+    }
+    let cleaned = trimSuffixes(fallback);
+    cleaned = cleaned.replace(/\/+$/, '');
+    if (!cleaned.toLowerCase().endsWith('/v1')) {
+      cleaned = `${cleaned}/v1`;
+    }
+    return cleaned;
+  }
+}
+
+function buildOpenAIErrorMessage(error) {
+  if (error && error.response) {
+    const status = error.response.status;
+    const data = error.response.data;
+    if (status === 404) {
+      return 'OpenAI API returned 404. Verify your Completions URL points to the API base (e.g. https://api.openai.com/v1) and that the requested model exists.';
+    }
+    if (data && typeof data === 'object') {
+      if (typeof data.error === 'string') {
+        return data.error;
+      }
+      if (data.error && typeof data.error.message === 'string') {
+        return data.error.message;
+      }
+    }
+    return `OpenAI API error (status ${status})`;
+  }
+  if (error && error.message) {
+    return error.message;
+  }
+  return 'Unknown OpenAI client error';
+}
+
+function parseJSONResponse(content) {
+  if (!content) {
+    throw new Error('Model returned empty response');
+  }
+
+  let cleaned = content.trim();
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (error) {
+    const fallbackMatch = cleaned.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+    if (fallbackMatch) {
+      try {
+        return JSON.parse(fallbackMatch[1]);
+      } catch (fallbackError) {
+        throw new Error(`Model response was not valid JSON: ${fallbackError.message}`);
+      }
+    }
+    throw new Error(`Model response was not valid JSON: ${error.message}`);
+  }
+}
+
+
+
+// Initialize ChromaDB collection
+async function initializeCollection() {
+  try {
+    // Use embedded ChromaDB (no server required)
+    chroma = new ChromaClient({
+      path: "./chroma_db" // Local embedded database
+    });
+    
+    // Try to get existing collection
+    collection = await chroma.getCollection({ name: "x_tweets" });
+    console.log("Connected to existing collection");
+  } catch (error) {
+    console.log("Creating new collection...");
+    // Create new collection if it doesn't exist
+    collection = await chroma.createCollection({
+      name: "x_tweets",
+      metadata: { "description": "X.com tweets with embeddings" }
+    });
+    console.log("Created new collection");
+  }
+}
+
+// Initialize OpenAI client
+function initializeOpenAI(apiKey, baseURL) {
+  const cleanBaseURL = sanitizeBaseURL(baseURL);
+
+  if (openai && openaiConfig.apiKey === apiKey && openaiConfig.baseURL === cleanBaseURL) {
+    return;
+  }
+
+  openai = new OpenAI({
+    apiKey: apiKey,
+    baseURL: cleanBaseURL
+  });
+  openaiConfig = { apiKey, baseURL: cleanBaseURL };
+}
+
+// Generate embeddings
+async function generateEmbedding(text) {
+  if (!openai) {
+    throw new Error('OpenAI client not initialized');
+  }
+  
+  if (!openai.embeddings || typeof openai.embeddings.create !== 'function') {
+    throw new Error('Configured OpenAI endpoint does not support embeddings. Verify your base URL and provider.');
+  }
+
+  try {
+    const response = await openai.embeddings.create({
+      model: 'text-embedding-3-small',
+      input: text
+    });
+    return response.data[0].embedding;
+  } catch (error) {
+    const message = buildOpenAIErrorMessage(error);
+    console.error('Error generating embedding:', message);
+    throw new Error(message);
+  }
+}
+
+// Analyze tweet for toxicity and bot likelihood
+async function analyzeTweet(tweetText, userInfo, modelName) {
+  if (!openai) {
+    throw new Error('OpenAI client not initialized');
+  }
+
+  const prompt = `Analyze this tweet for toxicity and bot likelihood:
+
+Tweet: "${tweetText}"
+User: @${userInfo.username} (${userInfo.displayName})
+Followers: ${userInfo.followersCount}
+Following: ${userInfo.followingCount}
+Account Age: ${userInfo.accountAge} days
+
+Provide a JSON response with:
+{
+  "toxicity_score": 0-10,
+  "bot_likelihood": 0-10,
+  "analysis": "brief explanation",
+  "red_flags": ["list", "of", "flags"]
+}
+Return only the JSON object with double-quoted keys and numeric values.`;
+
+  if (!openai.chat || !openai.chat.completions || typeof openai.chat.completions.create !== 'function') {
+    throw new Error('Configured OpenAI endpoint does not support chat.completions. Verify your base URL and provider.');
+  }
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: modelName || 'gpt-3.5-turbo',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.3
+    });
+
+    const content = response.choices && response.choices[0] && response.choices[0].message ? response.choices[0].message.content : '';
+    return parseJSONResponse(content);
+  } catch (error) {
+    const message = buildOpenAIErrorMessage(error);
+    console.error('Error analyzing tweet:', message);
+    return {
+      toxicity_score: 0,
+      bot_likelihood: 0,
+      analysis: message,
+      red_flags: []
+    };
+  }
+}
+
+// Store tweet in ChromaDB
+app.post('/api/store-tweet', async (req, res) => {
+  try {
+    const { tweet, userInfo, apiKey, baseURL, model } = req.body;
+    
+    // Initialize OpenAI client with the latest configuration
+    initializeOpenAI(apiKey, baseURL);
+
+    // Generate embedding
+    const embedding = await generateEmbedding(tweet.text);
+    
+    // Analyze tweet
+    const analysis = await analyzeTweet(tweet.text, userInfo, model);
+    
+    // Prepare metadata
+    const metadata = {
+      text: tweet.text,
+      author: userInfo.username,
+      displayName: userInfo.displayName,
+      timestamp: tweet.timestamp,
+      likes: tweet.likes,
+      retweets: tweet.retweets,
+      replies: tweet.replies,
+      followers: userInfo.followersCount,
+      following: userInfo.followingCount,
+      accountAge: userInfo.accountAge,
+      toxicity_score: analysis.toxicity_score,
+      bot_likelihood: analysis.bot_likelihood,
+      analysis: analysis.analysis,
+      red_flags: JSON.stringify(analysis.red_flags)
+    };
+
+    // Store in ChromaDB
+    await collection.add({
+      ids: [`tweet_${Date.now()}_${Math.random()}`],
+      embeddings: [embedding],
+      metadatas: [metadata],
+      documents: [tweet.text]
+    });
+
+    res.json({ 
+      success: true, 
+      analysis,
+      message: 'Tweet stored successfully' 
+    });
+  } catch (error) {
+    const message = buildOpenAIErrorMessage(error);
+    console.error('Error storing tweet:', message);
+    res.status(500).json({ 
+      success: false, 
+      error: message 
+    });
+  }
+});
+
+// Query tweets using RAG
+app.post('/api/query', async (req, res) => {
+  try {
+    const { query, apiKey, baseURL, model } = req.body;
+    
+    initializeOpenAI(apiKey, baseURL);
+
+    // Generate query embedding
+    const queryEmbedding = await generateEmbedding(query);
+    
+    // Search similar tweets
+    const results = await collection.query({
+      queryEmbeddings: [queryEmbedding],
+      nResults: 10
+    });
+
+    const documents = (results.documents && results.documents[0]) || [];
+    const metadatas = (results.metadatas && results.metadatas[0]) || [];
+
+    if (!documents.length) {
+      return res.json({
+        success: false,
+        answer: '',
+        sources: [],
+        totalResults: 0,
+        error: 'No tweets matched your query yet. Try analyzing more tweets first.'
+      });
+    }
+
+    // Prepare context from results
+    const context = documents.map((doc, index) => {
+      const metadata = metadatas[index];
+      return `Tweet: ${doc}\nAuthor: @${metadata.author}\nToxicity: ${metadata.toxicity_score}/10\nBot Likelihood: ${metadata.bot_likelihood}/10\n`;
+    }).join('\n');
+
+    // Generate answer using RAG
+    const ragPrompt = `Based on the following tweets and their analysis, answer the user's question:
+
+Context:
+${context}
+
+User Question: ${query}
+
+Provide a comprehensive answer based on the tweet data. Include relevant statistics and insights.`;
+
+    if (!openai.chat || !openai.chat.completions || typeof openai.chat.completions.create !== 'function') {
+      throw new Error('Configured OpenAI endpoint does not support chat.completions. Verify your base URL and provider.');
+    }
+
+    const response = await openai.chat.completions.create({
+      model: model || 'gpt-3.5-turbo',
+      messages: [{ role: 'user', content: ragPrompt }],
+      temperature: 0.7
+    });
+
+    const answerContent = response.choices && response.choices[0] && response.choices[0].message ? response.choices[0].message.content : '';
+    const answer = answerContent || '';
+    
+    // Extract sources
+    const sources = metadatas.map(meta => 
+      `@${meta.author}: "${meta.text.substring(0, 100)}..."`
+    );
+
+    res.json({
+      success: true,
+      answer,
+      sources,
+      totalResults: documents.length
+    });
+  } catch (error) {
+    const message = buildOpenAIErrorMessage(error);
+    console.error('Error querying tweets:', message);
+    res.status(500).json({ 
+      success: false, 
+      error: message 
+    });
+  }
+});
+
+// Get statistics
+app.get('/api/stats', async (req, res) => {
+  try {
+    const count = await collection.count();
+    res.json({ 
+      success: true, 
+      totalTweets: count 
+    });
+  } catch (error) {
+    console.error('Error getting stats:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'Server is running',
+    chromaConnected: !!collection
+  });
+});
+
+// Start server
+async function startServer() {
+  try {
+    await initializeCollection();
+    app.listen(PORT, () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+      console.log('Make sure ChromaDB is running on http://localhost:8000');
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+startServer();

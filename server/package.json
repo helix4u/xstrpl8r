@@ -1,0 +1,22 @@
+{
+  "name": "xstrpl8r-server",
+  "version": "1.0.0",
+  "description": "Local server for X.com AI Analyzer with ChromaDB",
+  "main": "server.js",
+  "scripts": {
+    "start": "node simple-server.js",
+    "dev": "nodemon simple-server.js",
+    "demo": "node demo-server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "chromadb": "^1.7.3",
+    "openai": "^4.20.1",
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}

@@ -162,6 +162,10 @@ The extension requires:
 - Update `server.js` to add new analysis functions
 - Extend the popup UI in `popup.html` and `popup.js`
 
+## Support
+
+If the tool is helpful, consider supporting it on [Ko-fi](https://ko-fi.com/gille).
+
 ## License
 
 MIT License - feel free to modify and distribute as needed.

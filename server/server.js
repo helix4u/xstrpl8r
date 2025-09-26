@@ -250,58 +250,96 @@ Return only the JSON object with double-quoted keys and numeric values.`;
 // Store tweet in ChromaDB
 app.post('/api/store-tweet', async (req, res) => {
   try {
-    const { tweet, userInfo, apiKey, baseURL, model } = req.body;
-    
+    const { tweet, userInfo, apiKey, baseURL, model, options } = req.body;
+
+    const shouldAnalyze = options && Object.prototype.hasOwnProperty.call(options, 'analyze')
+      ? Boolean(options.analyze)
+      : true;
+    const shouldStore = options && Object.prototype.hasOwnProperty.call(options, 'store')
+      ? Boolean(options.store)
+      : true;
+
+    if (!shouldAnalyze && !shouldStore) {
+      return res.json({
+        success: true,
+        analysis: null,
+        stored: false,
+        metadata: null,
+        message: 'No processing requested.'
+      });
+    }
+
     // Initialize OpenAI client with the latest configuration
     initializeOpenAI(apiKey, baseURL);
 
-    // Generate embedding
-    const embedding = await generateEmbedding(tweet.text);
-    
-    // Analyze tweet
-    const analysis = await analyzeTweet(tweet.text, userInfo, model);
-    
-    // Prepare metadata with normalized timestamps
-    const storedAt = new Date().toISOString();
-    const tweetTimestamp = normalizeTimestamp(tweet && tweet.timestamp, storedAt);
+    let analysis = null;
+    if (shouldAnalyze) {
+      analysis = await analyzeTweet(tweet.text, userInfo, model);
+    }
 
-    const metadata = {
-      text: tweet.text,
-      author: userInfo.username,
-      displayName: userInfo.displayName,
-      tweetId: tweet.id || null,
-      tweetedAt: tweetTimestamp,
-      scrapedAt: storedAt,
-      timestamp: tweetTimestamp,
-      likes: Number(tweet.likes ?? 0),
-      retweets: Number(tweet.retweets ?? 0),
-      replies: Number(tweet.replies ?? 0),
-      followers: Number(userInfo.followersCount ?? 0),
-      following: Number(userInfo.followingCount ?? 0),
-      accountAge: Number(userInfo.accountAge ?? 0),
-      toxicity_score: analysis.toxicity_score,
-      bot_likelihood: analysis.bot_likelihood,
-      analysis: analysis.analysis,
-      red_flags: JSON.stringify(analysis.red_flags)
-    };
+    let stored = false;
+    let metadataSummary = null;
 
-    // Store in ChromaDB
-    await collection.add({
-      ids: [`tweet_${Date.now()}_${Math.random()}`],
-      embeddings: [embedding],
-      metadatas: [metadata],
-      documents: [tweet.text]
-    });
+    if (shouldStore) {
+      const embedding = await generateEmbedding(tweet.text);
 
-    res.json({
-      success: true,
-      analysis,
-      metadata: {
+      const storedAt = new Date().toISOString();
+      const tweetTimestamp = normalizeTimestamp(tweet && tweet.timestamp, storedAt);
+
+      const analysisForMetadata = analysis || {
+        toxicity_score: 0,
+        bot_likelihood: 0,
+        analysis: shouldAnalyze ? 'Analysis unavailable.' : 'Analysis skipped (disabled).',
+        red_flags: []
+      };
+
+      const metadata = {
+        text: tweet.text,
+        author: userInfo.username,
+        displayName: userInfo.displayName,
+        tweetId: tweet.id || null,
+        tweetedAt: tweetTimestamp,
+        scrapedAt: storedAt,
+        timestamp: tweetTimestamp,
+        likes: Number(tweet.likes ?? 0),
+        retweets: Number(tweet.retweets ?? 0),
+        replies: Number(tweet.replies ?? 0),
+        followers: Number(userInfo.followersCount ?? 0),
+        following: Number(userInfo.followingCount ?? 0),
+        accountAge: Number(userInfo.accountAge ?? 0),
+        toxicity_score: Number(analysisForMetadata.toxicity_score ?? 0),
+        bot_likelihood: Number(analysisForMetadata.bot_likelihood ?? 0),
+        analysis: analysisForMetadata.analysis || '',
+        red_flags: JSON.stringify(Array.isArray(analysisForMetadata.red_flags) ? analysisForMetadata.red_flags : [])
+      };
+
+      await collection.add({
+        ids: [`tweet_${Date.now()}_${Math.random()}`],
+        embeddings: [embedding],
+        metadatas: [metadata],
+        documents: [tweet.text]
+      });
+
+      stored = true;
+      metadataSummary = {
         tweetId: metadata.tweetId,
         tweetedAt: metadata.tweetedAt,
         scrapedAt: metadata.scrapedAt
-      },
-      message: 'Tweet stored successfully'
+      };
+    }
+
+    const message = shouldStore
+      ? shouldAnalyze
+        ? 'Tweet analyzed and stored successfully.'
+        : 'Tweet stored successfully (analysis disabled).'
+      : 'Tweet analyzed successfully.';
+
+    res.json({
+      success: true,
+      analysis: shouldAnalyze ? analysis : null,
+      stored,
+      metadata: metadataSummary,
+      message
     });
   } catch (error) {
     const message = buildOpenAIErrorMessage(error);

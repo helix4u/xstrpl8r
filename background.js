@@ -3,11 +3,16 @@ const SERVER_URL = 'http://localhost:3001';
 
 // Listen for messages from content script and popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'analyzeTweet') {
-    analyzeTweet(request.tweetData).then(response => {
+  if (request.action === 'processTweet' || request.action === 'analyzeTweet') {
+    const options = Object.assign(
+      { analyze: true, store: true },
+      request && request.options ? request.options : {}
+    );
+
+    handleTweetProcessing(request.tweetData, options).then(response => {
       sendResponse(response);
     }).catch(error => {
-      console.error('Error in analyzeTweet:', error);
+      console.error('Error in handleTweetProcessing:', error);
       sendResponse({ success: false, error: error.message });
     });
     return true; // Keep message channel open for async response
@@ -22,10 +27,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
-// Analyze tweet by sending to local server
-async function analyzeTweet(tweetData) {
+// Process tweet by sending to local server
+async function handleTweetProcessing(tweetData, options = {}) {
   try {
-    console.log('Analyzing tweet:', tweetData.text.substring(0, 50) + '...');
+    if (!tweetData || !tweetData.text) {
+      throw new Error('Invalid tweet payload received.');
+    }
+
+    const { analyze = true, store = true } = options;
+
+    if (!analyze && !store) {
+      return { success: true, analysis: null, stored: false, message: 'No processing requested.' };
+    }
+
+    console.log(
+      'Processing tweet:',
+      tweetData.text.substring(0, 50) + '...',
+      `analyze=${analyze}`,
+      `store=${store}`
+    );
     
     // Check if server is running
     try {
@@ -57,7 +77,11 @@ async function analyzeTweet(tweetData) {
         userInfo: tweetData.user,
         apiKey: config.apiKey,
         baseURL: config.completionsUrl,
-        model: config.model
+        model: config.model,
+        options: {
+          analyze,
+          store
+        }
       })
     });
     
@@ -68,20 +92,30 @@ async function analyzeTweet(tweetData) {
     const result = await response.json();
     
     if (result.success) {
-      console.log('Tweet analyzed and stored:', result.analysis);
-      
-      // Show notification for high toxicity or bot likelihood
-      if (result.analysis.toxicity_score > 7 || result.analysis.bot_likelihood > 7) {
-        showNotification(tweetData, result.analysis);
+      const analysisData = analyze ? result.analysis || null : null;
+      const stored = store ? Boolean(result.stored) : false;
+
+      if (analysisData) {
+        console.log('Tweet analysis completed:', analysisData);
+
+        if (analysisData.toxicity_score > 7 || analysisData.bot_likelihood > 7) {
+          showNotification(tweetData, analysisData);
+        }
       }
       
-      return { success: true, analysis: result.analysis };
+      return {
+        success: true,
+        analysis: analysisData,
+        stored,
+        metadata: result.metadata || null,
+        message: result.message || null
+      };
     } else {
       console.error('Error analyzing tweet:', result.error);
       return { success: false, error: result.error };
     }
   } catch (error) {
-    console.error('Error sending tweet for analysis:', error);
+    console.error('Error sending tweet for processing:', error);
     return { success: false, error: error.message };
   }
 }

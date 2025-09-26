@@ -66,8 +66,15 @@ app.post('/api/store-tweet', async (req, res) => {
   try {
     console.log('Received tweet analysis request:', JSON.stringify(req.body, null, 2));
     
-    const { tweet, userInfo } = req.body;
-    
+    const { tweet, userInfo, options } = req.body;
+
+    const shouldAnalyze = options && Object.prototype.hasOwnProperty.call(options, 'analyze')
+      ? Boolean(options.analyze)
+      : true;
+    const shouldStore = options && Object.prototype.hasOwnProperty.call(options, 'store')
+      ? Boolean(options.store)
+      : true;
+
     if (!tweet || !userInfo) {
       console.error('Missing tweet or userInfo in request');
       return res.status(400).json({ 
@@ -75,37 +82,68 @@ app.post('/api/store-tweet', async (req, res) => {
         error: 'Missing tweet or userInfo data' 
       });
     }
-    
+
+    if (!shouldAnalyze && !shouldStore) {
+      return res.json({
+        success: true,
+        analysis: null,
+        stored: false,
+        message: 'No processing requested (demo mode).'
+      });
+    }
+
     // Mock analysis
-    const analysis = mockAnalyzeTweet(tweet.text, userInfo);
-    
+    const analysis = shouldAnalyze ? mockAnalyzeTweet(tweet.text, userInfo) : null;
+
     // Store in memory
-    const tweetData = {
-      id: `tweet_${Date.now()}_${Math.random()}`,
-      text: tweet.text,
-      author: userInfo.username,
-      displayName: userInfo.displayName,
-      timestamp: tweet.timestamp,
-      likes: tweet.likes,
-      retweets: tweet.retweets,
-      replies: tweet.replies,
-      followers: userInfo.followersCount,
-      following: userInfo.followingCount,
-      accountAge: userInfo.accountAge,
-      toxicity_score: analysis.toxicity_score,
-      bot_likelihood: analysis.bot_likelihood,
-      analysis: analysis.analysis,
-      red_flags: analysis.red_flags
-    };
-    
-    tweets.push(tweetData);
-    
-    console.log(`✅ Stored tweet #${tweets.length}: @${userInfo.username} - "${tweet.text.substring(0, 50)}..." - Toxicity: ${analysis.toxicity_score}/10, Bot: ${analysis.bot_likelihood}/10`);
+    let stored = false;
+    if (shouldStore) {
+      const analysisForStorage = analysis || {
+        toxicity_score: 0,
+        bot_likelihood: 0,
+        analysis: shouldAnalyze ? 'Analysis unavailable.' : 'Analysis skipped (disabled).',
+        red_flags: []
+      };
+
+      const tweetData = {
+        id: `tweet_${Date.now()}_${Math.random()}`,
+        text: tweet.text,
+        author: userInfo.username,
+        displayName: userInfo.displayName,
+        timestamp: tweet.timestamp,
+        likes: tweet.likes,
+        retweets: tweet.retweets,
+        replies: tweet.replies,
+        followers: userInfo.followersCount,
+        following: userInfo.followingCount,
+        accountAge: userInfo.accountAge,
+        toxicity_score: analysisForStorage.toxicity_score,
+        bot_likelihood: analysisForStorage.bot_likelihood,
+        analysis: analysisForStorage.analysis,
+        red_flags: analysisForStorage.red_flags
+      };
+
+      tweets.push(tweetData);
+      stored = true;
+
+      if (shouldAnalyze) {
+        console.log(`✅ Stored tweet #${tweets.length}: @${userInfo.username} - "${tweet.text.substring(0, 50)}..." - Toxicity: ${analysisForStorage.toxicity_score}/10, Bot: ${analysisForStorage.bot_likelihood}/10`);
+      } else {
+        console.log(`✅ Stored tweet #${tweets.length}: @${userInfo.username} (analysis skipped)`);
+      }
+    }
+
+    const message = shouldStore
+      ? shouldAnalyze
+        ? 'Tweet analyzed and stored successfully (demo mode).'
+        : 'Tweet stored successfully without analysis (demo mode).'
+      : 'Tweet analyzed successfully (demo mode).';
 
     res.json({ 
       success: true, 
-      analysis,
-      message: 'Tweet stored successfully (demo mode)' 
+      analysis: shouldAnalyze ? analysis : null,
+      stored,
+      message 
     });
   } catch (error) {
     console.error('❌ Error storing tweet:', error);

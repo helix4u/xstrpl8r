@@ -3,6 +3,7 @@
 const PANEL_ID = 'xai-analyzer-panel';
 
 let isAnalyzing = false;
+let isScraping = false;
 
 let processedTweets = new Set();
 
@@ -43,6 +44,34 @@ function persistAnalysisState(active) {
   } catch (error) {
 
     console.warn('Failed to persist analysis state', error);
+
+  }
+
+}
+
+function persistScrapingState(active) {
+
+  if (!chrome || !chrome.storage || !chrome.storage.local) {
+
+    return;
+
+  }
+
+
+
+  try {
+
+    chrome.storage.local.set({
+
+      scrapingActive: active,
+
+      scrapingLastUpdatedAt: new Date().toISOString()
+
+    });
+
+  } catch (error) {
+
+    console.warn('Failed to persist scraping state', error);
 
   }
 
@@ -154,6 +183,56 @@ const panelState = {
   answer: null
 
 };
+
+
+
+function isProcessingActive() {
+
+  return isAnalyzing || isScraping;
+
+}
+
+function ensureTweetProcessingActive({ initialScan = true } = {}) {
+
+  if (!isProcessingActive()) {
+
+    return;
+
+  }
+
+
+
+  if (initialScan) {
+
+    processVisibleTweets();
+
+  }
+
+
+
+  setupTweetObserver();
+
+}
+
+function teardownTweetProcessing() {
+
+  if (isProcessingActive()) {
+
+    return;
+
+  }
+
+
+
+  if (tweetObserver) {
+
+    tweetObserver.disconnect();
+
+    tweetObserver = null;
+
+  }
+
+}
 
 
 
@@ -733,6 +812,14 @@ function registerRuntimeListeners() {
 
       stopAnalysis('Analysis stopped from popup.');
 
+    } else if (request.action === 'startScraping') {
+
+      startScraping('popup');
+
+    } else if (request.action === 'stopScraping') {
+
+      stopScraping('Scraping stopped from popup.');
+
     } else if (request.action === 'updateStats') {
 
       updateStatsDisplay();
@@ -809,6 +896,30 @@ function registerStorageListeners() {
 
 
 
+    if (Object.prototype.hasOwnProperty.call(changes, 'scrapingActive')) {
+
+      const { newValue, oldValue } = changes.scrapingActive;
+
+      if (newValue !== oldValue) {
+
+        const shouldScrape = Boolean(newValue);
+
+        if (shouldScrape && !isScraping) {
+
+          startScraping('sync');
+
+        } else if (!shouldScrape && isScraping) {
+
+          stopScraping('Scraping stopped from extension menu.');
+
+        }
+
+      }
+
+    }
+
+
+
     if (Object.prototype.hasOwnProperty.call(changes, 'uiEnabled')) {
 
       const { newValue, oldValue } = changes.uiEnabled;
@@ -839,11 +950,21 @@ function syncInitialState() {
 
 
 
-  chrome.storage.local.get(["analysisActive", "uiEnabled"], (data) => {
+  chrome.storage.local.get(["analysisActive", "scrapingActive", "uiEnabled"], (data) => {
 
     const overlayEnabled = typeof (data && data.uiEnabled) === "boolean" ? data.uiEnabled : true;
 
     applyUIVisibility(overlayEnabled, { force: true, suppressStatus: true });
+
+
+
+    const shouldScrape = Boolean(data && data.scrapingActive);
+
+    if (shouldScrape) {
+
+      startScraping('restore');
+
+    }
 
 
 
@@ -870,11 +991,93 @@ function syncInitialState() {
 }
 
 
+function startScraping(source = 'ui') {
+
+  if (isScraping) {
+
+    if (source !== 'sync') {
+
+      showPanelStatus('Scraping already running.', 'info');
+
+    }
+
+    return;
+
+  }
+
+
+
+  isScraping = true;
+
+  const statusMessage = source === 'restore'
+
+    ? 'Scraping resumed automatically.'
+
+    : source === 'sync'
+
+      ? 'Scraping started from extension menu.'
+
+      : 'Scraping tweets for ChromaDB storage...';
+
+  if (source !== 'sync') {
+
+    showPanelStatus(statusMessage, 'success');
+
+  }
+
+
+
+  ensureTweetProcessingActive();
+
+  persistScrapingState(true);
+
+  console.log(`Tweet scraping started via ${source}`);
+
+}
+
+
+
+function stopScraping(message = 'Scraping paused.') {
+
+  if (!isScraping) {
+
+    return;
+
+  }
+
+
+
+  isScraping = false;
+
+  persistScrapingState(false);
+
+  teardownTweetProcessing();
+
+
+
+  const finalMessage = isAnalyzing
+
+    ? `${message} Analysis remains active.`
+
+    : message;
+
+  showPanelStatus(finalMessage, 'info');
+
+  console.log('Tweet scraping paused.');
+
+}
+
+
+
 function startAnalysis(source = 'ui') {
 
   if (isAnalyzing) {
 
-    showPanelStatus('Analysis already running.', 'info');
+    if (source !== 'sync') {
+
+      showPanelStatus('Analysis already running.', 'info');
+
+    }
 
     return;
 
@@ -896,11 +1099,15 @@ function startAnalysis(source = 'ui') {
 
       : 'Analyzing tweets in this timeline...';
 
-  showPanelStatus(statusMessage, 'success');
+  if (source !== 'sync') {
 
-  processVisibleTweets();
+    showPanelStatus(statusMessage, 'success');
 
-  setupTweetObserver();
+  }
+
+
+
+  ensureTweetProcessingActive();
 
   persistAnalysisState(true);
 
@@ -924,21 +1131,19 @@ function stopAnalysis(message = 'Analysis paused.') {
 
   updateToggleButton();
 
-
-
-  if (tweetObserver) {
-
-    tweetObserver.disconnect();
-
-    tweetObserver = null;
-
-  }
-
-
-
   persistAnalysisState(false);
 
-  showPanelStatus(message, 'info');
+  teardownTweetProcessing();
+
+
+
+  const finalMessage = isScraping
+
+    ? `${message} Scraping remains active.`
+
+    : message;
+
+  showPanelStatus(finalMessage, 'info');
 
   console.log('Tweet analysis paused.');
 
@@ -995,19 +1200,19 @@ function showPanelStatus(message, state = 'info') {
 
 function processVisibleTweets() {
 
+  if (!isProcessingActive()) {
+
+    return;
+
+  }
+
   const tweetElements = document.querySelectorAll('[data-testid="tweet"]');
 
   console.log(`Found ${tweetElements.length} tweets on page`);
 
-
-
   tweetElements.forEach((tweetElement) => {
 
-    if (isAnalyzing) {
-
-      processTweet(tweetElement);
-
-    }
+    processTweet(tweetElement);
 
   });
 
@@ -1051,7 +1256,7 @@ function setupTweetObserver() {
 
 
 
-        if (tweetElement && isAnalyzing) {
+        if (tweetElement && isProcessingActive()) {
 
           processTweet(tweetElement);
 
@@ -1109,7 +1314,26 @@ async function processTweet(tweetElement) {
 
     const tweetData = extractTweetData(tweetElement);
 
-    if (!tweetData || processedTweets.has(tweetData.id)) {
+    if (!tweetData) {
+
+      return;
+
+    }
+
+
+
+    const shouldAnalyze = isAnalyzing;
+    const shouldStore = isScraping;
+
+    if (!shouldAnalyze && !shouldStore) {
+
+      return;
+
+    }
+
+
+
+    if (processedTweets.has(tweetData.id)) {
 
       return;
 
@@ -1119,15 +1343,25 @@ async function processTweet(tweetElement) {
 
     processedTweets.add(tweetData.id);
 
+
+
     console.log('Processing tweet:', tweetData.text.substring(0, 80));
 
 
 
     const response = await sendRuntimeMessage({
 
-      action: 'analyzeTweet',
+      action: 'processTweet',
 
-      tweetData
+      tweetData,
+
+      options: {
+
+        analyze: shouldAnalyze,
+
+        store: shouldStore
+
+      }
 
     });
 
@@ -1135,9 +1369,39 @@ async function processTweet(tweetElement) {
 
     if (response && response.success) {
 
-      console.log('Tweet analysis completed:', response.analysis);
+      if (shouldAnalyze) {
 
-      addAnalysisResult(tweetData, response.analysis);
+        if (response.analysis) {
+
+          console.log('Tweet analysis completed:', response.analysis);
+
+          addAnalysisResult(tweetData, response.analysis);
+
+        } else {
+
+          console.warn('Analysis requested but not returned for tweet:', tweetData.id);
+
+          showPanelStatus('Analysis unavailable for this tweet.', 'error');
+
+        }
+
+      }
+
+
+
+      if (shouldStore) {
+
+        if (response.stored) {
+
+          console.log('Tweet stored successfully.');
+
+        } else {
+
+          console.warn('Storage requested but not confirmed for tweet:', tweetData.id);
+
+        }
+
+      }
 
     } else {
 
@@ -1145,9 +1409,9 @@ async function processTweet(tweetElement) {
 
         ? response.error
 
-        : 'Unknown analysis failure';
+        : 'Unknown processing failure';
 
-      console.error('Tweet analysis failed:', errorMessage);
+      console.error('Tweet processing failed:', errorMessage);
 
       showPanelStatus(errorMessage, 'error');
 
@@ -1656,6 +1920,13 @@ function extractTweetData(tweetElement) {
 
 
 function processVisibleTweets() {
+
+  if (!isProcessingActive()) {
+
+    return;
+
+  }
+
   const tweetElements = document.querySelectorAll('[data-testid="tweet"]');
   console.log(`Found ${tweetElements.length} tweets on page`);
   
@@ -1667,11 +1938,11 @@ function processVisibleTweets() {
 function startTweetMonitoring() {
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
-      if (isAnalyzing) {
+      if (isProcessingActive()) {
         processVisibleTweets();
       }
     });
-  } else if (isAnalyzing) {
+  } else if (isProcessingActive()) {
     processVisibleTweets();
   }
 }

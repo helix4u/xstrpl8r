@@ -148,6 +148,19 @@ async function initializeCollection() {
   }
 }
 
+function normalizeTimestamp(value, fallback) {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    return fallback;
+  }
+
+  return new Date(parsed).toISOString();
+}
+
 // Initialize OpenAI client
 function initializeOpenAI(apiKey, baseURL) {
   const cleanBaseURL = sanitizeBaseURL(baseURL);
@@ -248,18 +261,24 @@ app.post('/api/store-tweet', async (req, res) => {
     // Analyze tweet
     const analysis = await analyzeTweet(tweet.text, userInfo, model);
     
-    // Prepare metadata
+    // Prepare metadata with normalized timestamps
+    const storedAt = new Date().toISOString();
+    const tweetTimestamp = normalizeTimestamp(tweet && tweet.timestamp, storedAt);
+
     const metadata = {
       text: tweet.text,
       author: userInfo.username,
       displayName: userInfo.displayName,
-      timestamp: tweet.timestamp,
-      likes: tweet.likes,
-      retweets: tweet.retweets,
-      replies: tweet.replies,
-      followers: userInfo.followersCount,
-      following: userInfo.followingCount,
-      accountAge: userInfo.accountAge,
+      tweetId: tweet.id || null,
+      tweetedAt: tweetTimestamp,
+      scrapedAt: storedAt,
+      timestamp: tweetTimestamp,
+      likes: Number(tweet.likes ?? 0),
+      retweets: Number(tweet.retweets ?? 0),
+      replies: Number(tweet.replies ?? 0),
+      followers: Number(userInfo.followersCount ?? 0),
+      following: Number(userInfo.followingCount ?? 0),
+      accountAge: Number(userInfo.accountAge ?? 0),
       toxicity_score: analysis.toxicity_score,
       bot_likelihood: analysis.bot_likelihood,
       analysis: analysis.analysis,
@@ -274,10 +293,15 @@ app.post('/api/store-tweet', async (req, res) => {
       documents: [tweet.text]
     });
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       analysis,
-      message: 'Tweet stored successfully' 
+      metadata: {
+        tweetId: metadata.tweetId,
+        tweetedAt: metadata.tweetedAt,
+        scrapedAt: metadata.scrapedAt
+      },
+      message: 'Tweet stored successfully'
     });
   } catch (error) {
     const message = buildOpenAIErrorMessage(error);
@@ -320,8 +344,10 @@ app.post('/api/query', async (req, res) => {
 
     // Prepare context from results
     const context = documents.map((doc, index) => {
-      const metadata = metadatas[index];
-      return `Tweet: ${doc}\nAuthor: @${metadata.author}\nToxicity: ${metadata.toxicity_score}/10\nBot Likelihood: ${metadata.bot_likelihood}/10\n`;
+      const metadata = metadatas[index] || {};
+      const tweetedAt = metadata.tweetedAt || metadata.timestamp || 'Unknown';
+      const scrapedAt = metadata.scrapedAt || 'Unknown';
+      return `Tweet: ${doc}\nAuthor: @${metadata.author}\nTweeted At: ${tweetedAt}\nScraped At: ${scrapedAt}\nToxicity: ${metadata.toxicity_score}/10\nBot Likelihood: ${metadata.bot_likelihood}/10\n`;
     }).join('\n');
 
     // Generate answer using RAG
@@ -348,9 +374,11 @@ Provide a comprehensive answer based on the tweet data. Include relevant statist
     const answer = answerContent || '';
     
     // Extract sources
-    const sources = metadatas.map(meta => 
-      `@${meta.author}: "${meta.text.substring(0, 100)}..."`
-    );
+    const sources = metadatas.map((meta = {}) => {
+      const snippet = (meta.text || '').substring(0, 100);
+      const tweetedAt = meta.tweetedAt || meta.timestamp || 'unknown date';
+      return `@${meta.author}: "${snippet}..." (tweeted ${tweetedAt})`;
+    });
 
     res.json({
       success: true,

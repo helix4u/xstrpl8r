@@ -18,6 +18,119 @@ const stats = {
 
 let tweetObserver = null;
 
+let isUIEnabled = true;
+
+function persistAnalysisState(active) {
+
+  if (!chrome || !chrome.storage || !chrome.storage.local) {
+
+    return;
+
+  }
+
+
+
+  try {
+
+    chrome.storage.local.set({
+
+      analysisActive: active,
+
+      analysisLastUpdatedAt: new Date().toISOString()
+
+    });
+
+  } catch (error) {
+
+    console.warn('Failed to persist analysis state', error);
+
+  }
+
+}
+
+function persistUIState(enabled) {
+
+  if (!chrome || !chrome.storage || !chrome.storage.local) {
+
+    return;
+
+  }
+
+
+
+  try {
+
+    chrome.storage.local.set({
+
+      uiEnabled: enabled,
+
+      uiLastUpdatedAt: new Date().toISOString()
+
+    });
+
+  } catch (error) {
+
+    console.warn('Failed to persist overlay state', error);
+
+  }
+
+}
+
+function applyUIVisibility(shouldShow, options = {}) {
+
+  const { suppressStatus = false, force = false } = options;
+
+  const nextState = Boolean(shouldShow);
+
+  if (!force && nextState === isUIEnabled) {
+
+    return;
+
+  }
+
+  isUIEnabled = nextState;
+
+  if (panelState.root) {
+
+    panelState.root.style.display = nextState ? 'flex' : 'none';
+
+    panelState.root.setAttribute('aria-hidden', String(!nextState));
+
+  }
+
+  if (!suppressStatus) {
+
+    if (nextState) {
+
+      showPanelStatus('Overlay re-enabled.', 'info');
+
+    } else {
+
+      showPanelStatus('Overlay hidden.', 'info');
+
+    }
+
+  }
+
+  updateToggleButton();
+
+}
+
+function setUIVisibility(shouldShow, source = 'ui') {
+
+  const suppressStatus = source === 'sync';
+
+  applyUIVisibility(shouldShow, { force: true, suppressStatus });
+
+  persistUIState(shouldShow);
+
+  if (source !== 'sync') {
+
+    console.log(`Overlay visibility updated via ${source}: ${shouldShow ? 'shown' : 'hidden'}`);
+
+  }
+
+}
 
 
 const panelState = {
@@ -54,9 +167,13 @@ function init() {
 
   registerRuntimeListeners();
 
+  registerStorageListeners();
+
   startTweetMonitoring();
 
   updateStatsDisplay();
+
+  syncInitialState();
 
 }
 
@@ -620,12 +737,137 @@ function registerRuntimeListeners() {
 
       updateStatsDisplay();
 
+    } else if (request.action === 'setUIVisibility') {
+
+      if (typeof request.enabled === 'boolean') {
+
+        setUIVisibility(request.enabled, request.source || 'popup');
+
+      }
+
+    } else if (request.action === 'hideUI') {
+
+      setUIVisibility(false, request.source || 'popup');
+
+    } else if (request.action === 'showUI') {
+
+      setUIVisibility(true, request.source || 'popup');
+
+    } else if (request.action === 'toggleUI') {
+
+      setUIVisibility(!isUIEnabled, request.source || 'popup');
+
     }
 
   });
 
 }
 
+
+
+function registerStorageListeners() {
+
+  if (!chrome || !chrome.storage || !chrome.storage.onChanged) {
+
+    return;
+
+  }
+
+
+
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+
+    if (areaName !== 'local') {
+
+      return;
+
+    }
+
+
+
+    if (Object.prototype.hasOwnProperty.call(changes, 'analysisActive')) {
+
+      const { newValue, oldValue } = changes.analysisActive;
+
+      if (newValue !== oldValue) {
+
+        const shouldAnalyze = Boolean(newValue);
+
+        if (shouldAnalyze && !isAnalyzing) {
+
+          startAnalysis('sync');
+
+        } else if (!shouldAnalyze && isAnalyzing) {
+
+          stopAnalysis('Analysis stopped from extension menu.');
+
+        }
+
+      }
+
+    }
+
+
+
+    if (Object.prototype.hasOwnProperty.call(changes, 'uiEnabled')) {
+
+      const { newValue, oldValue } = changes.uiEnabled;
+
+      if (newValue !== oldValue) {
+
+        applyUIVisibility(Boolean(newValue), { force: true, suppressStatus: true });
+
+      }
+
+    }
+
+  });
+
+}
+
+
+
+function syncInitialState() {
+
+  if (!chrome || !chrome.storage || !chrome.storage.local) {
+
+    updateToggleButton();
+
+    return;
+
+  }
+
+
+
+  chrome.storage.local.get(["analysisActive", "uiEnabled"], (data) => {
+
+    const overlayEnabled = typeof (data && data.uiEnabled) === "boolean" ? data.uiEnabled : true;
+
+    applyUIVisibility(overlayEnabled, { force: true, suppressStatus: true });
+
+
+
+    const shouldAnalyze = Boolean(data && data.analysisActive);
+
+    if (shouldAnalyze && isUIEnabled) {
+
+      startAnalysis('restore');
+
+    } else {
+
+      updateToggleButton();
+
+      if (shouldAnalyze && !isUIEnabled) {
+
+        persistAnalysisState(false);
+
+      }
+
+    }
+
+  });
+
+}
 
 
 function startAnalysis(source = 'ui') {
@@ -644,11 +886,23 @@ function startAnalysis(source = 'ui') {
 
   updateToggleButton();
 
-  showPanelStatus('Analyzing tweets in this timeline...', 'success');
+  const statusMessage = source === 'restore'
+
+    ? 'Analysis resumed automatically.'
+
+    : source === 'sync'
+
+      ? 'Analysis started from extension menu.'
+
+      : 'Analyzing tweets in this timeline...';
+
+  showPanelStatus(statusMessage, 'success');
 
   processVisibleTweets();
 
   setupTweetObserver();
+
+  persistAnalysisState(true);
 
   console.log(`Tweet analysis started via ${source}`);
 
@@ -670,12 +924,25 @@ function stopAnalysis(message = 'Analysis paused.') {
 
   updateToggleButton();
 
+
+
+  if (tweetObserver) {
+
+    tweetObserver.disconnect();
+
+    tweetObserver = null;
+
+  }
+
+
+
+  persistAnalysisState(false);
+
   showPanelStatus(message, 'info');
 
   console.log('Tweet analysis paused.');
 
 }
-
 
 
 function updateToggleButton() {
@@ -1412,6 +1679,4 @@ function startTweetMonitoring() {
 
 
 init();
-
-
 

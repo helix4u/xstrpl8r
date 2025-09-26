@@ -4,6 +4,7 @@ document.addEventListener('DOMContentLoaded', function() {
   const modelInput = document.getElementById('model');
   const saveConfigBtn = document.getElementById('saveConfig');
   const startAnalysisBtn = document.getElementById('startAnalysis');
+  const toggleUIButton = document.getElementById('toggleUI');
   const statusDiv = document.getElementById('status');
   const tweetsProcessedSpan = document.getElementById('tweetsProcessed');
   const accountsAnalyzedSpan = document.getElementById('accountsAnalyzed');
@@ -11,66 +12,204 @@ document.addEventListener('DOMContentLoaded', function() {
   const askQuestionBtn = document.getElementById('askQuestion');
   const queryResultsDiv = document.getElementById('queryResults');
 
-  // Load saved configuration
+  let isConfigured = false;
+  let isAnalysisActive = false;
+  let isToggleInFlight = false;
+  let isUIVisible = true;
+  let isUIInFlight = false;
+
+  function refreshAnalysisButton() {
+    const label = isAnalysisActive ? 'Stop Analysis' : 'Start Analysis';
+    startAnalysisBtn.textContent = label;
+    startAnalysisBtn.classList.toggle('is-active', isAnalysisActive);
+    const shouldDisable = isToggleInFlight || (!isAnalysisActive && !isConfigured);
+    startAnalysisBtn.disabled = shouldDisable;
+  }
+
+  function refreshUIVisibilityButton() {
+    if (!toggleUIButton) {
+      return;
+    }
+
+    const label = isUIVisible ? 'Hide Overlay' : 'Show Overlay';
+    toggleUIButton.textContent = label;
+    toggleUIButton.classList.toggle('is-active', isUIVisible);
+    toggleUIButton.disabled = isUIInFlight;
+  }
+
+  function setToggleBusy(state) {
+    isToggleInFlight = state;
+    refreshAnalysisButton();
+  }
+
+  function setUIBusy(state) {
+    isUIInFlight = state;
+    refreshUIVisibilityButton();
+  }
+
+  function updateConfigurationState(config) {
+    const hasApiKey = Boolean((config.apiKey || '').trim());
+    const hasBaseUrl = Boolean((config.completionsUrl || '').trim());
+    const hasModel = Boolean((config.model || '').trim());
+    isConfigured = hasApiKey && hasBaseUrl && hasModel;
+    refreshAnalysisButton();
+  }
+
+  refreshAnalysisButton();
+  refreshUIVisibilityButton();
+
   chrome.storage.sync.get(['apiKey', 'completionsUrl', 'model'], function(result) {
     if (result.apiKey) apiKeyInput.value = result.apiKey;
     if (result.completionsUrl) completionsUrlInput.value = result.completionsUrl;
     if (result.model) modelInput.value = result.model;
-    
-    // Enable start analysis button only if configured
-    if (result.apiKey && result.completionsUrl && result.model) {
-      startAnalysisBtn.disabled = false;
+
+    updateConfigurationState(result);
+
+    if (isConfigured) {
       showStatus('Ready for AI analysis!', 'success');
     } else {
-      startAnalysisBtn.disabled = true;
       showStatus('Please configure your API credentials first', 'error');
     }
   });
 
-  // Save configuration
+  chrome.storage.local.get(['analysisActive', 'uiEnabled'], function(state) {
+    isAnalysisActive = Boolean(state.analysisActive);
+    if (typeof state.uiEnabled === 'boolean') {
+      isUIVisible = state.uiEnabled;
+    }
+
+    refreshAnalysisButton();
+    refreshUIVisibilityButton();
+  });
+
+  chrome.storage.onChanged.addListener(function(changes, areaName) {
+    if (areaName === 'local') {
+      if (changes.analysisActive) {
+        isAnalysisActive = Boolean(changes.analysisActive.newValue);
+        refreshAnalysisButton();
+      }
+
+      if (changes.uiEnabled) {
+        isUIVisible = Boolean(changes.uiEnabled.newValue);
+        refreshUIVisibilityButton();
+      }
+    }
+
+    if (areaName === 'sync' && (changes.apiKey || changes.completionsUrl || changes.model)) {
+      chrome.storage.sync.get(['apiKey', 'completionsUrl', 'model'], function(currentConfig) {
+        updateConfigurationState(currentConfig);
+      });
+    }
+  });
+
   saveConfigBtn.addEventListener('click', function() {
     const config = {
-      apiKey: apiKeyInput.value,
-      completionsUrl: completionsUrlInput.value,
-      model: modelInput.value
+      apiKey: apiKeyInput.value.trim(),
+      completionsUrl: completionsUrlInput.value.trim(),
+      model: modelInput.value.trim()
     };
-    
+
     if (!config.apiKey || !config.completionsUrl || !config.model) {
       showStatus('Please fill in all fields', 'error');
       return;
     }
-    
+
     chrome.storage.sync.set(config, function() {
+      updateConfigurationState(config);
       showStatus('Configuration saved! Ready for AI analysis.', 'success');
-      startAnalysisBtn.disabled = false;
     });
   });
 
-  // Start analysis
   startAnalysisBtn.addEventListener('click', function() {
-    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-      chrome.tabs.sendMessage(tabs[0].id, {action: 'startAnalysis'});
-      showStatus('Analysis started! Monitoring tweets...', 'info');
+    if (startAnalysisBtn.disabled) {
+      return;
+    }
+
+    setToggleBusy(true);
+
+    chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+      if (!tabs || !tabs.length) {
+        setToggleBusy(false);
+        showStatus('Open an X.com tab to control analysis.', 'error');
+        return;
+      }
+
+      const targetTabId = tabs[0].id;
+      const action = isAnalysisActive ? 'stopAnalysis' : 'startAnalysis';
+
+      chrome.tabs.sendMessage(targetTabId, { action }, function() {
+        setToggleBusy(false);
+
+        if (chrome.runtime.lastError) {
+          showStatus('Unable to reach the content script. Navigate to X.com and try again.', 'error');
+          return;
+        }
+
+        isAnalysisActive = action === 'startAnalysis';
+        chrome.storage.local.set({
+          analysisActive: isAnalysisActive,
+          analysisLastUpdatedAt: new Date().toISOString()
+        });
+
+        refreshAnalysisButton();
+        showStatus(isAnalysisActive ? 'Analysis started! Monitoring tweets...' : 'Analysis stopped.', 'info');
+      });
     });
   });
 
-  // Ask question
+  toggleUIButton.addEventListener('click', function() {
+    if (toggleUIButton.disabled) {
+      return;
+    }
+
+    setUIBusy(true);
+
+    chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+      if (!tabs || !tabs.length) {
+        setUIBusy(false);
+        showStatus('Open an X.com tab to control the overlay.', 'error');
+        return;
+      }
+
+      const targetTabId = tabs[0].id;
+      const nextState = !isUIVisible;
+
+      chrome.tabs.sendMessage(targetTabId, { action: 'setUIVisibility', enabled: nextState, source: 'popup' }, function() {
+        setUIBusy(false);
+
+        if (chrome.runtime.lastError) {
+          showStatus('Unable to reach the content script. Navigate to X.com and try again.', 'error');
+          return;
+        }
+
+        isUIVisible = nextState;
+        chrome.storage.local.set({
+          uiEnabled: isUIVisible,
+          uiLastUpdatedAt: new Date().toISOString()
+        });
+
+        refreshUIVisibilityButton();
+        showStatus(isUIVisible ? 'Overlay shown.' : 'Overlay hidden.', 'info');
+      });
+    });
+  });
+
   askQuestionBtn.addEventListener('click', async function() {
     const query = queryInput.value.trim();
     if (!query) return;
-    
+
     askQuestionBtn.disabled = true;
     askQuestionBtn.textContent = 'Thinking...';
-    
+
     try {
       const response = await chrome.runtime.sendMessage({
         action: 'askQuestion',
         query: query
       });
-      
+
       askQuestionBtn.disabled = false;
       askQuestionBtn.textContent = 'Ask Question';
-      
+
       if (response.success) {
         queryResultsDiv.style.display = 'block';
         queryResultsDiv.innerHTML = `<strong>Answer:</strong><br>${response.answer}`;
@@ -87,7 +226,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   });
 
-  // Update stats
   function updateStats() {
     chrome.storage.local.get(['tweetsProcessed', 'accountsAnalyzed'], function(result) {
       tweetsProcessedSpan.textContent = result.tweetsProcessed || 0;
@@ -95,7 +233,6 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 
-  // Show status message
   function showStatus(message, type) {
     statusDiv.textContent = message;
     statusDiv.className = `status ${type}`;
@@ -105,13 +242,12 @@ document.addEventListener('DOMContentLoaded', function() {
     }, 3000);
   }
 
-  // Listen for stats updates
-  chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
+  chrome.runtime.onMessage.addListener(function(request) {
     if (request.action === 'updateStats') {
       updateStats();
     }
   });
 
-  // Initial stats update
   updateStats();
 });
+

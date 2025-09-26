@@ -119,6 +119,19 @@ function parseJSONResponse(content) {
   }
 }
 
+function normalizeTimestamp(value, fallback) {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    return fallback;
+  }
+
+  return new Date(parsed).toISOString();
+}
+
 // Initialize OpenAI client
 function initializeOpenAI(apiKey, baseURL) {
   const cleanBaseURL = sanitizeBaseURL(baseURL);
@@ -229,31 +242,42 @@ app.post('/api/store-tweet', async (req, res) => {
     // Analyze tweet
     const analysis = await analyzeTweet(tweet.text, userInfo, model);
     
-    // Store in memory
+    // Store in memory with normalized timestamps
+    const storedAt = new Date().toISOString();
+    const tweetTimestamp = normalizeTimestamp(tweet && tweet.timestamp, storedAt);
+
     const tweetData = {
-      id: `tweet_${Date.now()}_${Math.random()}`,
+      id: tweet.id || `tweet_${Date.now()}_${Math.random()}`,
       text: tweet.text,
       author: userInfo.username,
       displayName: userInfo.displayName,
-      timestamp: tweet.timestamp,
-      likes: tweet.likes,
-      retweets: tweet.retweets,
-      replies: tweet.replies,
-      followers: userInfo.followersCount,
-      following: userInfo.followingCount,
-      accountAge: userInfo.accountAge,
+      tweetId: tweet.id || null,
+      tweetedAt: tweetTimestamp,
+      scrapedAt: storedAt,
+      timestamp: tweetTimestamp,
+      likes: Number(tweet.likes ?? 0),
+      retweets: Number(tweet.retweets ?? 0),
+      replies: Number(tweet.replies ?? 0),
+      followers: Number(userInfo.followersCount ?? 0),
+      following: Number(userInfo.followingCount ?? 0),
+      accountAge: Number(userInfo.accountAge ?? 0),
       toxicity_score: analysis.toxicity_score,
       bot_likelihood: analysis.bot_likelihood,
       analysis: analysis.analysis,
       red_flags: analysis.red_flags,
       embedding: embedding
     };
-    
+
     tweets.push(tweetData);
 
     res.json({ 
       success: true, 
       analysis,
+      metadata: {
+        tweetId: tweetData.tweetId,
+        tweetedAt: tweetData.tweetedAt,
+        scrapedAt: tweetData.scrapedAt
+      },
       message: 'Tweet stored successfully' 
     });
   } catch (error) {
@@ -327,7 +351,9 @@ app.post('/api/query', async (req, res) => {
 
     // Prepare context from results
     const context = sortedTweets.map((tweet, index) => {
-      return `Tweet ${index + 1}: ${tweet.text}\nAuthor: @${tweet.author}\nToxicity: ${tweet.toxicity_score}/10\nBot Likelihood: ${tweet.bot_likelihood}/10\nSimilarity: ${(tweet.similarity * 100).toFixed(1)}%\nTimestamp: ${tweet.timestamp}\n`;
+      const tweetedAt = tweet.tweetedAt || tweet.timestamp || 'Unknown';
+      const scrapedAt = tweet.scrapedAt || 'Unknown';
+      return `Tweet ${index + 1}: ${tweet.text}\nAuthor: @${tweet.author}\nToxicity: ${tweet.toxicity_score}/10\nBot Likelihood: ${tweet.bot_likelihood}/10\nSimilarity: ${(tweet.similarity * 100).toFixed(1)}%\nTweeted At: ${tweetedAt}\nScraped At: ${scrapedAt}\n`;
     }).join('\n');
 
     // Generate answer using RAG
@@ -354,9 +380,12 @@ Provide a comprehensive answer based on the tweet data. Include relevant statist
     const answer = answerContent || '';
     
     // Extract sources with similarity scores
-    const sources = sortedTweets.map(tweet => 
-      `@${tweet.author}: "${tweet.text.substring(0, 100)}..." (${(tweet.similarity * 100).toFixed(1)}% similar)`
-    );
+    const sources = sortedTweets.map(tweet => {
+      const snippet = (tweet.text || '').substring(0, 100);
+      const tweetedAt = tweet.tweetedAt || tweet.timestamp || 'unknown date';
+      const similarityLabel = (tweet.similarity * 100).toFixed(1);
+      return `@${tweet.author}: "${snippet}..." (tweeted ${tweetedAt}, ${similarityLabel}% similar)`;
+    });
 
     res.json({
       success: true,

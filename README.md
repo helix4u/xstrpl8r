@@ -15,80 +15,30 @@ A Chrome extension that analyzes X.com (Twitter) tweets in real-time using AI, s
 
 ### Prerequisites
 
-- Node.js (v16 or higher)
-- Python 3.8+
+- Node.js 18+
+- Python 3.9+ (for ChromaDB CLI)
 - Chrome browser
-- OpenAI API key
+- OpenAI-compatible API key
 
-### Quick Start (Windows)
+### Quick Start (Windows — recommended)
 
-1. **Run the production setup**:
-   ```cmd
-   start.bat
-   ```
-
-2. **Get your OpenAI API key**:
-   - Visit https://platform.openai.com/api-keys
-   - Create a new API key
-
-3. **Load the extension in Chrome**:
-   - Open `chrome://extensions/`
-   - Enable "Developer mode"
-   - Click "Load unpacked" and select this directory
-
-4. **Configure the extension**:
-   - Click the extension icon in your browser toolbar
-   - Enter your API key, completions URL, and model name
-   - Click "Save Configuration"
-   - Click "Start Analysis"
-
-### Manual Setup
-
-1. **Install dependencies**:
-   ```bash
-   # Install Node.js dependencies
-   cd server
-   npm install
+1. Start everything:
    
-   # Install Python dependencies
-   pip install chromadb openai
-   ```
+   This installs deps, starts ChromaDB (http://localhost:8000), and runs the server (http://localhost:3001).
+2. Load the extension in Chrome:
+   - Open 
+   - Enable Developer mode
+   - Click “Load unpacked” and select this folder
+3. In the popup, save your API key, base URL (e.g. ), and model.
 
-2. **Start ChromaDB**:
-   ```bash
-   chroma run --host localhost --port 8000
-   ```
+### Manual (macOS/Linux/WSL)
 
-3. **Start the AI server**:
-   ```bash
-   cd server
-   npm start
-   ```
-
-4. **Load the Chrome extension** (same as above)
-
-### Manual Setup (Alternative)
-
-If the setup script doesn't work, you can set up manually:
-
-1. **Install ChromaDB**:
-   ```bash
-   pip install chromadb
-   chroma run --host localhost --port 8000
-   ```
-
-2. **Install server dependencies**:
-   ```bash
-   cd server
-   npm install
-   npm start
-   ```
-
-3. **Load the Chrome extension** (same as above)
+1. Install deps and start services:
+   
 
 ## Usage
 
-1. **Start Analysis**: Click the extension icon and click "Start Analysis"
+1. **Start Capture**: Click the extension icon and click "Start Capture"
 2. **Browse X.com**: The extension will automatically detect and analyze tweets
 3. **Ask Questions**: Use the query box in the popup to ask questions about the tweets you've seen
 4. **View Stats**: Monitor how many tweets and accounts have been analyzed
@@ -97,7 +47,7 @@ If the setup script doesn't work, you can set up manually:
 
 The extension requires:
 - **API Key**: Your OpenAI API key (or compatible service)
-- **Completions URL**: The API endpoint (e.g., `https://api.openai.com/v1/chat/completions`)
+- **Completions URL**: The API base (e.g., `https://api.openai.com/v1`)
 - **Model**: The model to use (e.g., `gpt-4.1-mini`)
 
 ## Features Explained
@@ -154,7 +104,8 @@ The extension requires:
 ├── server/               # Local server
 │   ├── server.js         # Express server with ChromaDB
 │   └── package.json      # Server dependencies
-└── setup.sh             # Setup script
+└── start.bat           # Windows bootstrap (Chroma + server)
+setup.sh            # Cross-platform helper
 ```
 
 ### Adding New Features

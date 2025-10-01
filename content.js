@@ -1287,6 +1287,11 @@ function sendRuntimeMessage(payload) {
 
 async function processTweet(tweetElement) {
 
+  // Expand any truncated tweet content before extraction
+  if (tweetElement && typeof tweetElement.querySelector === 'function') {
+    try { await ensureTweetExpanded(tweetElement); } catch (_) {}
+  }
+
   const tweetData = extractTweetData(tweetElement);
 
   if (!tweetData) {
@@ -1893,6 +1898,56 @@ function extractNumber(text) {
 
   }
 
+}
+
+// Utility: poll a predicate until it returns true or timeout expires
+function waitFor(predicate, { timeoutMs = 1500, intervalMs = 50 } = {}) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const tick = () => {
+      try {
+        if (predicate()) {
+          resolve(true);
+          return;
+        }
+      } catch (_) {}
+      if (Date.now() - start >= timeoutMs) {
+        resolve(false);
+        return;
+      }
+      setTimeout(tick, intervalMs);
+    };
+    tick();
+  });
+}
+
+// Ensure a tweet is fully expanded (click Show more; un-clamp quoted tweets)
+async function ensureTweetExpanded(tweetElement) {
+  if (!tweetElement || typeof tweetElement.querySelector !== 'function') return;
+
+  const showMoreBtn = tweetElement.querySelector("button[data-testid='tweet-text-show-more-link']");
+  const textEl = tweetElement.querySelector("[data-testid='tweetText']");
+  const initialLen = textEl && textEl.textContent ? textEl.textContent.length : 0;
+
+  if (showMoreBtn) {
+    try { showMoreBtn.click(); } catch (_) {}
+    await waitFor(() => {
+      const btn = tweetElement.querySelector("button[data-testid='tweet-text-show-more-link']");
+      const el = tweetElement.querySelector("[data-testid='tweetText']");
+      const len = el && el.textContent ? el.textContent.length : 0;
+      return !btn || (len > initialLen);
+    }, { timeoutMs: 1500, intervalMs: 50 });
+  }
+
+  try {
+    const quotedTweet = tweetElement.querySelector("div[id^='id__'][aria-labelledby^='id__']");
+    if (quotedTweet) {
+      const quotedText = quotedTweet.querySelector("div[data-testid='tweetText']");
+      if (quotedText && quotedText.style) {
+        quotedText.style.removeProperty('-webkit-line-clamp');
+      }
+    }
+  } catch (_) { /* ignore */ }
 }
 
 function calculateAccountAge(tweetElement) {

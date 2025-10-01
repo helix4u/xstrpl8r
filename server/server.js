@@ -225,7 +225,7 @@ Return only the JSON object with double-quoted keys and numeric values.`;
 
   try {
     const response = await openai.chat.completions.create({
-      model: modelName || 'gpt-3.5-turbo',
+      model: modelName || 'gpt-4.1-mini',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.3
     });
@@ -400,7 +400,7 @@ Provide a comprehensive answer based on the tweet data. Include relevant statist
     }
 
     const response = await openai.chat.completions.create({
-      model: model || 'gpt-3.5-turbo',
+      model: model || 'gpt-4.1-mini',
       messages: [{ role: 'user', content: ragPrompt }],
       temperature: 0.7
     });

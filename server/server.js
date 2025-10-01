@@ -382,7 +382,8 @@ app.post('/api/query', async (req, res) => {
       const metadata = metadatas[index] || {};
       const tweetedAt = metadata.tweetedAt || metadata.timestamp || 'Unknown';
       const scrapedAt = metadata.scrapedAt || 'Unknown';
-      return `Tweet: ${doc}\nAuthor: @${metadata.author}\nTweeted At: ${tweetedAt}\nScraped At: ${scrapedAt}\nToxicity: ${metadata.toxicity_score}/10\nBot Likelihood: ${metadata.bot_likelihood}/10\n`;
+      // Drop toxicity/bot lines from the context; keep only essentials
+      return `Tweet: ${doc}\nAuthor: @${metadata.author}\nTweeted At: ${tweetedAt}\nScraped At: ${scrapedAt}\n`;
     }).join('\n');
 
     // Generate answer using RAG

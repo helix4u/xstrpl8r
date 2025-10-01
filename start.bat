@@ -67,6 +67,3 @@ echo    - Click 'Load unpacked' and select this directory
 echo 3. Configure the extension with your API key
 echo 4. Start analyzing tweets!
 echo.
-echo Press any key to open Chrome extensions page...
-pause >nul
-start chrome://extensions/

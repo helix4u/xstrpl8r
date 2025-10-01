@@ -3,9 +3,9 @@ const SERVER_URL = 'http://localhost:3001';
 
 // Listen for messages from content script and popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'processTweet' || request.action === 'analyzeTweet') {
+  if (request.action === 'processTweet') {
     const options = Object.assign(
-      { analyze: true, store: true },
+      { analyze: false, store: true },
       request && request.options ? request.options : {}
     );
 
@@ -17,7 +17,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     });
     return true; // Keep message channel open for async response
   } else if (request.action === 'askQuestion') {
-    askQuestion(request.query).then(response => {
+    askQuestion(request).then(response => {
       sendResponse(response);
     });
     return true; // Keep message channel open for async response
@@ -34,7 +34,7 @@ async function handleTweetProcessing(tweetData, options = {}) {
       throw new Error('Invalid tweet payload received.');
     }
 
-    const { analyze = true, store = true } = options;
+    const { analyze = false, store = true } = options;
 
     if (!analyze && !store) {
       return { success: true, analysis: null, stored: false, message: 'No processing requested.' };
@@ -43,7 +43,6 @@ async function handleTweetProcessing(tweetData, options = {}) {
     console.log(
       'Processing tweet:',
       tweetData.text.substring(0, 50) + '...',
-      `analyze=${analyze}`,
       `store=${store}`
     );
     
@@ -92,26 +91,17 @@ async function handleTweetProcessing(tweetData, options = {}) {
     const result = await response.json();
     
     if (result.success) {
-      const analysisData = analyze ? result.analysis || null : null;
       const stored = store ? Boolean(result.stored) : false;
 
-      if (analysisData) {
-        console.log('Tweet analysis completed:', analysisData);
-
-        if (analysisData.toxicity_score > 7 || analysisData.bot_likelihood > 7) {
-          showNotification(tweetData, analysisData);
-        }
-      }
-      
       return {
         success: true,
-        analysis: analysisData,
+        analysis: null,
         stored,
         metadata: result.metadata || null,
-        message: result.message || null
+        message: result.message || ''
       };
     } else {
-      console.error('Error analyzing tweet:', result.error);
+      console.error('Error capturing tweet:', result.error);
       return { success: false, error: result.error };
     }
   } catch (error) {
@@ -121,7 +111,7 @@ async function handleTweetProcessing(tweetData, options = {}) {
 }
 
 // Ask question using RAG
-async function askQuestion(query) {
+async function askQuestion({ query, includeKeywords = [], excludeKeywords = [], maxResults } = {}) {
   try {
     // Get configuration (required for production mode)
     const config = await chrome.storage.sync.get(['apiKey', 'completionsUrl', 'model']);
@@ -131,6 +121,9 @@ async function askQuestion(query) {
     }
     
     // Send to local server
+    const normalizedInclude = Array.isArray(includeKeywords) ? includeKeywords.filter(Boolean) : [];
+    const normalizedExclude = Array.isArray(excludeKeywords) ? excludeKeywords.filter(Boolean) : [];
+
     const response = await fetch(`${SERVER_URL}/api/query`, {
       method: 'POST',
       headers: {
@@ -140,7 +133,10 @@ async function askQuestion(query) {
         query: query,
         apiKey: config.apiKey,
         baseURL: config.completionsUrl,
-        model: config.model
+        model: config.model,
+        includeKeywords: normalizedInclude,
+        excludeKeywords: normalizedExclude,
+        maxResults: maxResults
       })
     });
     
@@ -152,30 +148,26 @@ async function askQuestion(query) {
   }
 }
 
-// Show notification for concerning tweets
+// Show notification for noteworthy narratives
 function showNotification(tweetData, analysis) {
-  const isHighToxicity = analysis.toxicity_score > 7;
-  const isHighBotLikelihood = analysis.bot_likelihood > 7;
-  
-  let title = 'X.com AI Analyzer';
-  let message = '';
-  
-  if (isHighToxicity && isHighBotLikelihood) {
-    title = '⚠️ High Risk Tweet Detected';
-    message = `@${tweetData.user.username}: High toxicity (${analysis.toxicity_score}/10) and bot likelihood (${analysis.bot_likelihood}/10)`;
-  } else if (isHighToxicity) {
-    title = '🚨 High Toxicity Detected';
-    message = `@${tweetData.user.username}: Toxicity score ${analysis.toxicity_score}/10`;
-  } else if (isHighBotLikelihood) {
-    title = '🤖 High Bot Likelihood';
-    message = `@${tweetData.user.username}: Bot likelihood ${analysis.bot_likelihood}/10`;
-  }
-  
+  const storySignals = analysis.story_signals || {};
+  const significanceScore = Number(storySignals.significance_score);
+  const momentum = storySignals.momentum || 'steady';
+  const callout = Array.isArray(analysis.callouts) && analysis.callouts.length
+    ? analysis.callouts[0]
+    : analysis.summary || analysis.intent || 'New story signal spotted.';
+
+  const title = 'Narrative highlight';
+  const suffix = Number.isFinite(significanceScore)
+    ? `significance ${significanceScore.toFixed(1)}/10`
+    : 'story signal';
+  const message = `@${tweetData.user.username}: ${callout}\nMomentum ${momentum}, ${suffix}`;
+
   chrome.notifications.create({
     type: 'basic',
     iconUrl: 'icon48.png',
-    title: title,
-    message: message
+    title,
+    message
   });
 }
 

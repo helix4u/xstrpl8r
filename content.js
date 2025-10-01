@@ -2,10 +2,14 @@
 
 const PANEL_ID = 'xai-analyzer-panel';
 
-let isAnalyzing = false;
-let isScraping = false;
+const SCAN_INTERVAL_MS = 4000;
+const PROCESSED_TWEET_LIMIT = 10000;
 
-let processedTweets = new Set();
+let isCapturing = false;
+
+const processedTweets = new Set();
+const processedTweetOrder = [];
+const processingTweets = new Set();
 
 const stats = {
 
@@ -18,10 +22,11 @@ const stats = {
 
 
 let tweetObserver = null;
+let scanIntervalId = null;
 
 let isUIEnabled = true;
 
-function persistAnalysisState(active) {
+function persistCaptureState(active) {
 
   if (!chrome || !chrome.storage || !chrome.storage.local) {
 
@@ -35,43 +40,15 @@ function persistAnalysisState(active) {
 
     chrome.storage.local.set({
 
-      analysisActive: active,
+      captureActive: active,
 
-      analysisLastUpdatedAt: new Date().toISOString()
-
-    });
-
-  } catch (error) {
-
-    console.warn('Failed to persist analysis state', error);
-
-  }
-
-}
-
-function persistScrapingState(active) {
-
-  if (!chrome || !chrome.storage || !chrome.storage.local) {
-
-    return;
-
-  }
-
-
-
-  try {
-
-    chrome.storage.local.set({
-
-      scrapingActive: active,
-
-      scrapingLastUpdatedAt: new Date().toISOString()
+      captureLastUpdatedAt: new Date().toISOString()
 
     });
 
   } catch (error) {
 
-    console.warn('Failed to persist scraping state', error);
+    console.warn('Failed to persist capture state', error);
 
   }
 
@@ -178,6 +155,12 @@ const panelState = {
 
   questionInput: null,
 
+  includeInput: null,
+
+  excludeInput: null,
+
+  maxResultsInput: null,
+
   askButton: null,
 
   answer: null
@@ -185,10 +168,104 @@ const panelState = {
 };
 
 
+function parsePanelKeywords(value) {
+
+  const source = Array.isArray(value) ? value : String(value || '').split(',');
+
+  return source
+
+    .map((item) => String(item || '').trim().toLowerCase())
+
+    .filter(Boolean);
+
+}
+
+
+function getPanelQueryOptions() {
+
+  const includeRaw = panelState.includeInput ? panelState.includeInput.value : '';
+
+  const excludeRaw = panelState.excludeInput ? panelState.excludeInput.value : '';
+
+  const maxRaw = panelState.maxResultsInput ? panelState.maxResultsInput.value : '';
+
+  const includeKeywords = parsePanelKeywords(includeRaw);
+
+  const excludeKeywords = parsePanelKeywords(excludeRaw);
+
+  const parsedMax = parseInt(maxRaw, 10);
+
+  const maxResults = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : undefined;
+
+  return { includeRaw, excludeRaw, maxRaw, includeKeywords, excludeKeywords, maxResults };
+
+}
+
+
+function persistPanelQueryOptions() {
+
+  const { includeRaw, excludeRaw, maxRaw } = getPanelQueryOptions();
+
+  if (chrome && chrome.storage && chrome.storage.local) {
+
+    chrome.storage.local.set({
+
+      queryOptions: {
+
+        include: includeRaw,
+
+        exclude: excludeRaw,
+
+        maxResults: maxRaw || '10'
+
+      }
+
+    });
+
+  }
+
+}
+
+
+function hydratePanelQueryOptions() {
+
+  if (!chrome || !chrome.storage || !chrome.storage.local) {
+
+    return;
+
+  }
+
+
+  chrome.storage.local.get(['queryOptions'], (data) => {
+
+    const options = Object.assign({ include: '', exclude: '', maxResults: '10' }, data && data.queryOptions ? data.queryOptions : {});
+
+    if (panelState.includeInput) {
+
+      panelState.includeInput.value = options.include || '';
+
+    }
+
+    if (panelState.excludeInput) {
+
+      panelState.excludeInput.value = options.exclude || '';
+
+    }
+
+    if (panelState.maxResultsInput) {
+
+      panelState.maxResultsInput.value = options.maxResults || '10';
+
+    }
+
+  });
+
+}
+
 
 function isProcessingActive() {
 
-  return isAnalyzing || isScraping;
+  return isCapturing;
 
 }
 
@@ -211,6 +288,7 @@ function ensureTweetProcessingActive({ initialScan = true } = {}) {
 
 
   setupTweetObserver();
+  ensureScanInterval();
 
 }
 
@@ -231,6 +309,10 @@ function teardownTweetProcessing() {
     tweetObserver = null;
 
   }
+
+  clearScanInterval();
+
+  processingTweets.clear();
 
 }
 
@@ -273,399 +355,328 @@ function injectPanelStyles() {
   style.id = `${PANEL_ID}-styles`;
 
   style.textContent = `
-
     #${PANEL_ID} {
-
       position: fixed;
-
-      right: 24px;
-
-      bottom: 24px;
-
-      width: 360px;
-
-      max-width: 90vw;
-
+      top: 20px;
+      right: 20px;
+      width: 350px;
       max-height: 80vh;
-
-      display: flex;
-
-      flex-direction: column;
-
-      background: rgba(17, 17, 17, 0.92);
-
-      color: #f2f2f2;
-
-      font-family: 'Segoe UI', Arial, sans-serif;
-
+      background: white;
+      border: 1px solid #e1e8ed;
       border-radius: 12px;
-
-      box-shadow: 0 18px 32px rgba(0, 0, 0, 0.35);
-
-      z-index: 2147483647;
-
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      z-index: 10000;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.4;
       overflow: hidden;
-
+      display: flex;
+      flex-direction: column;
     }
-
-
-
-    #${PANEL_ID} * {
-
-      box-sizing: border-box;
-
-    }
-
-
 
     #${PANEL_ID}.is-paused {
-
-      opacity: 0.9;
-
+      opacity: 0.7;
     }
 
-
-
-    #${PANEL_ID} .xca-header {
-
+    .xca-header {
       display: flex;
-
-      align-items: center;
-
       justify-content: space-between;
-
+      align-items: center;
       padding: 12px 16px;
-
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-
+      background: #f8f9fa;
+      border-bottom: 1px solid #e1e8ed;
     }
 
-
-
-    #${PANEL_ID} .xca-title {
-
+    .xca-title {
+      font-weight: 600;
+      color: #1da1f2;
       font-size: 16px;
-
-      font-weight: 600;
-
     }
 
-
-
-    #${PANEL_ID} .xca-toggle {
-
+    .xca-toggle {
+      background: #1da1f2;
+      color: white;
       border: none;
-
-      border-radius: 20px;
-
-      background: #0078d4;
-
-      color: #ffffff;
-
-      cursor: pointer;
-
-      padding: 6px 14px;
-
-      font-size: 13px;
-
-      font-weight: 600;
-
-      transition: background 0.2s ease;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-toggle.is-active {
-
-      background: #d43f00;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-toggle:disabled {
-
-      opacity: 0.6;
-
-      cursor: default;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-status {
-
-      padding: 8px 16px;
-
-      font-size: 12px;
-
-      color: #d0d0d0;
-
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-
-    }
-
-
-
-    #${PANEL_ID} .xca-status[data-state="error"] {
-
-      color: #ffb3b3;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-status[data-state="success"] {
-
-      color: #8ce199;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-stats {
-
-      display: flex;
-
-      gap: 16px;
-
-      padding: 8px 16px;
-
-      font-size: 12px;
-
-      color: #bbbbbb;
-
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-
-    }
-
-
-
-    #${PANEL_ID} .xca-stats strong {
-
-      color: #ffffff;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-question {
-
-      display: flex;
-
-      align-items: center;
-
-      gap: 8px;
-
-      padding: 10px 16px;
-
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-
-      background: rgba(255, 255, 255, 0.02);
-
-    }
-
-
-
-    #${PANEL_ID} .xca-question input {
-
-      flex: 1;
-
-      padding: 8px;
-
+      padding: 6px 12px;
       border-radius: 6px;
-
-      border: 1px solid rgba(255, 255, 255, 0.1);
-
-      background: rgba(255, 255, 255, 0.08);
-
-      color: #ffffff;
-
-      font-size: 13px;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-question input::placeholder {
-
-      color: rgba(255, 255, 255, 0.6);
-
-    }
-
-
-
-    #${PANEL_ID} .xca-question button {
-
-      border: none;
-
-      border-radius: 6px;
-
-      background: #00a870;
-
-      color: #ffffff;
-
-      cursor: pointer;
-
-      padding: 8px 14px;
-
-      font-size: 13px;
-
-      font-weight: 600;
-
-      transition: background 0.2s ease;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-question button:disabled {
-
-      opacity: 0.6;
-
-      cursor: default;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-answer {
-
-      padding: 12px 16px;
-
-      font-size: 13px;
-
-      line-height: 1.4;
-
-      color: #e6e6e6;
-
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-
-      max-height: 120px;
-
-      overflow-y: auto;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-answer.xca-answer-error {
-
-      color: #ffb3b3;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-answer .xca-answer-sources {
-
-      margin-top: 8px;
-
       font-size: 12px;
-
-      color: #bbbbbb;
-
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 0.2s;
     }
 
-
-
-    #${PANEL_ID} .xca-results {
-
-      flex: 1;
-
-      overflow-y: auto;
-
-      padding: 12px 16px 16px;
-
-      display: flex;
-
-      flex-direction: column;
-
-      gap: 12px;
-
+    .xca-toggle:hover {
+      background: #0d8bd9;
     }
 
+    .xca-toggle.is-active {
+      background: #e0245e;
+    }
 
+    .xca-status {
+      padding: 8px 16px;
+      font-size: 12px;
+      border-bottom: 1px solid #e1e8ed;
+    }
 
-    #${PANEL_ID} .xca-empty {
+    .xca-status[data-state="info"] {
+      background: #d1ecf1;
+      color: #0c5460;
+    }
 
-      font-size: 13px;
+    .xca-status[data-state="success"] {
+      background: #d4edda;
+      color: #155724;
+    }
 
-      color: rgba(255, 255, 255, 0.7);
+    .xca-status[data-state="error"] {
+      background: #f8d7da;
+      color: #721c24;
+    }
 
+    .xca-metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: #e1e8ed;
+      margin: 0;
+    }
+
+    .xca-metric {
+      background: white;
+      padding: 12px;
       text-align: center;
-
-      padding: 24px 0;
-
     }
 
-
-
-    #${PANEL_ID} .xca-result {
-
-      background: rgba(255, 255, 255, 0.04);
-
-      border-radius: 10px;
-
-      padding: 10px 12px;
-
-      border: 1px solid rgba(255, 255, 255, 0.04);
-
-      display: flex;
-
-      flex-direction: column;
-
-      gap: 6px;
-
+    .xca-metric-value {
+      display: block;
+      font-size: 18px;
+      font-weight: bold;
+      color: #1da1f2;
     }
 
-
-
-    #${PANEL_ID} .xca-result-header {
-
-      display: flex;
-
-      justify-content: space-between;
-
-      font-size: 12px;
-
-      color: rgba(255, 255, 255, 0.75);
-
-    }
-
-
-
-    #${PANEL_ID} .xca-result-text {
-
-      font-size: 13px;
-
-      color: #ffffff;
-
-      white-space: pre-wrap;
-
-    }
-
-
-
-    #${PANEL_ID} .xca-result-analysis {
-
-      font-size: 12px;
-
-      color: rgba(255, 255, 255, 0.8);
-
-    }
-
-
-
-    #${PANEL_ID} .xca-result-flags {
-
+    .xca-metric-label {
+      display: block;
       font-size: 11px;
-
-      color: #ffb347;
-
+      color: #657786;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
     }
 
+    .xca-query {
+      padding: 16px;
+      border-bottom: 1px solid #e1e8ed;
+    }
+
+    .xca-query textarea {
+      width: 100%;
+      min-height: 60px;
+      padding: 8px;
+      border: 1px solid #e1e8ed;
+      border-radius: 6px;
+      font-size: 14px;
+      resize: vertical;
+      font-family: inherit;
+    }
+
+    .xca-query-options {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin: 8px 0;
+    }
+
+    .xca-option {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .xca-option label {
+      font-size: 11px;
+      font-weight: 600;
+      color: #657786;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .xca-option input {
+      padding: 6px 8px;
+      border: 1px solid #e1e8ed;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: inherit;
+    }
+
+    .xca-ask {
+      width: 100%;
+      background: #1da1f2;
+      color: white;
+      border: none;
+      padding: 10px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: background-color 0.2s;
+    }
+
+    .xca-ask:hover:not(:disabled) {
+      background: #0d8bd9;
+    }
+
+    .xca-ask:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    .xca-answer {
+      padding: 16px;
+      border-bottom: 1px solid #e1e8ed;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .xca-answer-text {
+      font-size: 14px;
+      line-height: 1.5;
+      color: #14171a;
+    }
+
+    .xca-answer-sources {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #e1e8ed;
+      font-size: 12px;
+      color: #657786;
+    }
+
+    .xca-answer-error {
+      color: #e0245e;
+    }
+
+    .xca-results {
+      padding: 16px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .xca-empty {
+      text-align: center;
+      color: #657786;
+      font-style: italic;
+      font-size: 12px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      #${PANEL_ID} {
+        background: #15202b;
+        border-color: #38444d;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+        color: #e7ecf0;
+      }
+      #${PANEL_ID}.is-paused {
+        opacity: 0.85;
+      }
+      .xca-header {
+        background: #192734;
+        border-bottom-color: #38444d;
+      }
+      .xca-title {
+        color: #1d9bf0;
+      }
+      .xca-toggle {
+        background: #1d9bf0;
+        color: #0f1419;
+      }
+      .xca-toggle:hover:not(:disabled) {
+        background: #1a8cd8;
+      }
+      .xca-toggle.is-active {
+        background: #f4212e;
+        color: #f5f8fa;
+      }
+      .xca-status {
+        border-bottom-color: #38444d;
+      }
+      .xca-status[data-state="info"] {
+        background: rgba(29, 155, 240, 0.12);
+        color: #8ecdf7;
+      }
+      .xca-status[data-state="success"] {
+        background: rgba(25, 207, 105, 0.12);
+        color: #7dd1a3;
+      }
+      .xca-status[data-state="error"] {
+        background: rgba(244, 33, 46, 0.18);
+        color: #ff8595;
+      }
+      .xca-metrics {
+        background: #38444d;
+      }
+      .xca-metric {
+        background: #0f1419;
+      }
+      .xca-metric-value {
+        color: #1d9bf0;
+      }
+      .xca-metric-label {
+        color: #8899a6;
+      }
+      .xca-query {
+        border-bottom-color: #38444d;
+      }
+      .xca-query textarea,
+      .xca-option input {
+        background: #15202b;
+        border-color: #38444d;
+        color: #e7ecf0;
+      }
+      .xca-query textarea::placeholder,
+      .xca-option input::placeholder {
+        color: #536471;
+      }
+      .xca-option label {
+        color: #8899a6;
+      }
+      .xca-ask {
+        background: #1d9bf0;
+        color: #0f1419;
+      }
+      .xca-ask:disabled {
+        background: #273340;
+        color: #536471;
+      }
+      .xca-answer {
+        border-bottom-color: #38444d;
+        background: #0f1419;
+      }
+      .xca-answer-text {
+        color: #e7ecf0;
+      }
+      .xca-answer-sources {
+        border-top-color: #38444d;
+        color: #8899a6;
+      }
+      .xca-results {
+        background: #0f1419;
+      }
+      .xca-empty {
+        color: #536471;
+      }
+    }
+    @media (max-width: 480px) {
+      #${PANEL_ID} {
+        width: calc(100vw - 40px);
+        right: 20px;
+        left: 20px;
+      }
+      
+      .xca-query-options {
+        grid-template-columns: 1fr;
+      }
+    }
   `;
 
 
@@ -696,27 +707,67 @@ function createFloatingPanel() {
 
     <div class="xca-header">
 
-      <span class="xca-title">X.com AI Analyzer</span>
+      <span class="xca-title">Story Explorer</span>
 
-      <button class="xca-toggle" type="button">Start Analysis</button>
-
-    </div>
-
-    <div class="xca-status" data-state="info">Analyzer idle. Toggle to start collecting tweets.</div>
-
-    <div class="xca-stats">
-
-      <span>Tweets: <strong data-role="tweets">0</strong></span>
-
-      <span>Accounts: <strong data-role="accounts">0</strong></span>
+      <button class="xca-toggle" type="button">Start Capture</button>
 
     </div>
 
-    <div class="xca-question">
+    <div class="xca-status" data-state="info">Capture paused. Toggle to start collecting tweets.</div>
 
-      <input type="text" data-role="question" placeholder="Ask about analyzed tweets..." />
+    <div class="xca-metrics">
 
-      <button type="button" data-role="ask">Ask</button>
+      <div class="xca-metric">
+
+        <span class="xca-metric-value" data-role="tweets">0</span>
+
+        <span class="xca-metric-label">Tweets</span>
+
+      </div>
+
+      <div class="xca-metric">
+
+        <span class="xca-metric-value" data-role="accounts">0</span>
+
+        <span class="xca-metric-label">Accounts</span>
+
+      </div>
+
+    </div>
+
+    <div class="xca-query">
+
+      <textarea data-role="question" placeholder="Ask about the captured tweets..."></textarea>
+
+      <div class="xca-query-options">
+
+        <div class="xca-option">
+
+          <label>Include keywords</label>
+
+          <input type="text" data-role="include-keywords" placeholder="e.g. trump, policy" />
+
+        </div>
+
+        <div class="xca-option">
+
+          <label>Exclude keywords</label>
+
+          <input type="text" data-role="exclude-keywords" placeholder="e.g. spam, ads" />
+
+        </div>
+
+        <div class="xca-option">
+
+          <label>Max results</label>
+
+          <input type="number" data-role="max-results" min="1" max="25" step="1" />
+
+        </div>
+
+      </div>
+
+      <button type="button" class="xca-ask" data-role="ask">Ask</button>
 
     </div>
 
@@ -724,7 +775,7 @@ function createFloatingPanel() {
 
     <div class="xca-results" data-role="results">
 
-      <div class="xca-empty">No tweets analyzed yet.</div>
+      <div class="xca-empty">Capture is running. Tweets will appear here once you ask questions.</div>
 
     </div>
 
@@ -750,21 +801,49 @@ function createFloatingPanel() {
 
   panelState.questionInput = panel.querySelector('[data-role="question"]');
 
+  panelState.includeInput = panel.querySelector('[data-role="include-keywords"]');
+
+  panelState.excludeInput = panel.querySelector('[data-role="exclude-keywords"]');
+
+  panelState.maxResultsInput = panel.querySelector('[data-role="max-results"]');
+
   panelState.askButton = panel.querySelector('[data-role="ask"]');
 
   panelState.answer = panel.querySelector('[data-role="answer"]');
 
 
 
+  hydratePanelQueryOptions();
+
+  if (panelState.includeInput) {
+
+    panelState.includeInput.addEventListener('input', persistPanelQueryOptions);
+
+  }
+
+  if (panelState.excludeInput) {
+
+    panelState.excludeInput.addEventListener('input', persistPanelQueryOptions);
+
+  }
+
+  if (panelState.maxResultsInput) {
+
+    panelState.maxResultsInput.addEventListener('input', persistPanelQueryOptions);
+
+  }
+
+
+
   panelState.toggleButton.addEventListener('click', () => {
 
-    if (isAnalyzing) {
+    if (isCapturing) {
 
-      stopAnalysis('Analysis paused. Toggle to resume.');
+      stopCapture('Capture paused. Toggle to resume.');
 
     } else {
 
-      startAnalysis('ui');
+      startCapture('ui');
 
     }
 
@@ -778,13 +857,15 @@ function createFloatingPanel() {
 
     if (!query) {
 
-      showPanelStatus('Enter a question to query analyzed tweets.', 'info');
+      showPanelStatus('Enter a question to query captured tweets.', 'info');
 
       return;
 
     }
 
-    askQuestion(query);
+    const { includeKeywords, excludeKeywords, maxResults } = getPanelQueryOptions();
+
+    askQuestion({ query, includeKeywords, excludeKeywords, maxResults });
 
   });
 
@@ -804,21 +885,13 @@ function registerRuntimeListeners() {
 
 
 
-    if (request.action === 'startAnalysis') {
+    if (request.action === 'startCapture' || request.action === 'startAnalysis') {
 
-      startAnalysis('popup');
+      startCapture(request.source || 'popup');
 
-    } else if (request.action === 'stopAnalysis') {
+    } else if (request.action === 'stopCapture' || request.action === 'stopAnalysis') {
 
-      stopAnalysis('Analysis stopped from popup.');
-
-    } else if (request.action === 'startScraping') {
-
-      startScraping('popup');
-
-    } else if (request.action === 'stopScraping') {
-
-      stopScraping('Scraping stopped from popup.');
+      stopCapture('Capture stopped from popup.');
 
     } else if (request.action === 'updateStats') {
 
@@ -843,6 +916,14 @@ function registerRuntimeListeners() {
     } else if (request.action === 'toggleUI') {
 
       setUIVisibility(!isUIEnabled, request.source || 'popup');
+
+    } else if (request.action === 'askQuestion') {
+
+      // Forwarded queries from popup reuse shared handler
+
+      const { query, includeKeywords, excludeKeywords, maxResults } = request;
+
+      askQuestion({ query, includeKeywords, excludeKeywords, maxResults, source: 'popup' });
 
     }
 
@@ -872,45 +953,22 @@ function registerStorageListeners() {
 
 
 
-    if (Object.prototype.hasOwnProperty.call(changes, 'analysisActive')) {
 
-      const { newValue, oldValue } = changes.analysisActive;
+    if (Object.prototype.hasOwnProperty.call(changes, 'captureActive')) {
 
-      if (newValue !== oldValue) {
-
-        const shouldAnalyze = Boolean(newValue);
-
-        if (shouldAnalyze && !isAnalyzing) {
-
-          startAnalysis('sync');
-
-        } else if (!shouldAnalyze && isAnalyzing) {
-
-          stopAnalysis('Analysis stopped from extension menu.');
-
-        }
-
-      }
-
-    }
-
-
-
-    if (Object.prototype.hasOwnProperty.call(changes, 'scrapingActive')) {
-
-      const { newValue, oldValue } = changes.scrapingActive;
+      const { newValue, oldValue } = changes.captureActive;
 
       if (newValue !== oldValue) {
 
         const shouldScrape = Boolean(newValue);
 
-        if (shouldScrape && !isScraping) {
+        if (shouldScrape && !isCapturing) {
 
-          startScraping('sync');
+          startCapture('sync');
 
-        } else if (!shouldScrape && isScraping) {
+        } else if (!shouldScrape && isCapturing) {
 
-          stopScraping('Scraping stopped from extension menu.');
+          stopCapture('Capture stopped from extension menu.');
 
         }
 
@@ -950,54 +1008,40 @@ function syncInitialState() {
 
 
 
-  chrome.storage.local.get(["analysisActive", "scrapingActive", "uiEnabled"], (data) => {
+  chrome.storage.local.get(['captureActive', 'uiEnabled'], (data) => {
 
-    const overlayEnabled = typeof (data && data.uiEnabled) === "boolean" ? data.uiEnabled : true;
+    const overlayEnabled = typeof (data && data.uiEnabled) === 'boolean' ? data.uiEnabled : true;
 
     applyUIVisibility(overlayEnabled, { force: true, suppressStatus: true });
 
 
 
-    const shouldScrape = Boolean(data && data.scrapingActive);
+    const shouldCapture = Boolean(data && data.captureActive);
 
-    if (shouldScrape) {
+    if (shouldCapture) {
 
-      startScraping('restore');
+      startCapture('restore');
 
-    }
-
-
-
-    const shouldAnalyze = Boolean(data && data.analysisActive);
-
-    if (shouldAnalyze && isUIEnabled) {
-
-      startAnalysis('restore');
-
-    } else {
-
-      updateToggleButton();
-
-      if (shouldAnalyze && !isUIEnabled) {
-
-        persistAnalysisState(false);
-
-      }
+      return;
 
     }
+
+
+
+    updateToggleButton();
 
   });
 
 }
 
 
-function startScraping(source = 'ui') {
+function startCapture(source = 'ui') {
 
-  if (isScraping) {
+  if (isCapturing) {
 
     if (source !== 'sync') {
 
-      showPanelStatus('Scraping already running.', 'info');
+      showPanelStatus('Capture already running.', 'info');
 
     }
 
@@ -1007,17 +1051,19 @@ function startScraping(source = 'ui') {
 
 
 
-  isScraping = true;
+  isCapturing = true;
+
+  updateToggleButton();
 
   const statusMessage = source === 'restore'
 
-    ? 'Scraping resumed automatically.'
+    ? 'Capture resumed automatically.'
 
     : source === 'sync'
 
-      ? 'Scraping started from extension menu.'
+      ? 'Capture enabled from extension menu.'
 
-      : 'Scraping tweets for ChromaDB storage...';
+      : 'Capturing tweets from this timeline...';
 
   if (source !== 'sync') {
 
@@ -1029,17 +1075,17 @@ function startScraping(source = 'ui') {
 
   ensureTweetProcessingActive();
 
-  persistScrapingState(true);
+  persistCaptureState(true);
 
-  console.log(`Tweet scraping started via ${source}`);
+  console.log('Tweet capture started via', source);
 
 }
 
 
 
-function stopScraping(message = 'Scraping paused.') {
+function stopCapture(message = 'Capture paused.') {
 
-  if (!isScraping) {
+  if (!isCapturing) {
 
     return;
 
@@ -1047,107 +1093,22 @@ function stopScraping(message = 'Scraping paused.') {
 
 
 
-  isScraping = false;
+  isCapturing = false;
 
-  persistScrapingState(false);
+  updateToggleButton();
+
+  persistCaptureState(false);
 
   teardownTweetProcessing();
 
 
 
-  const finalMessage = isAnalyzing
+  showPanelStatus(message, 'info');
 
-    ? `${message} Analysis remains active.`
-
-    : message;
-
-  showPanelStatus(finalMessage, 'info');
-
-  console.log('Tweet scraping paused.');
+  console.log('Tweet capture paused.');
 
 }
 
-
-
-function startAnalysis(source = 'ui') {
-
-  if (isAnalyzing) {
-
-    if (source !== 'sync') {
-
-      showPanelStatus('Analysis already running.', 'info');
-
-    }
-
-    return;
-
-  }
-
-
-
-  isAnalyzing = true;
-
-  updateToggleButton();
-
-  const statusMessage = source === 'restore'
-
-    ? 'Analysis resumed automatically.'
-
-    : source === 'sync'
-
-      ? 'Analysis started from extension menu.'
-
-      : 'Analyzing tweets in this timeline...';
-
-  if (source !== 'sync') {
-
-    showPanelStatus(statusMessage, 'success');
-
-  }
-
-
-
-  ensureTweetProcessingActive();
-
-  persistAnalysisState(true);
-
-  console.log(`Tweet analysis started via ${source}`);
-
-}
-
-
-
-function stopAnalysis(message = 'Analysis paused.') {
-
-  if (!isAnalyzing) {
-
-    return;
-
-  }
-
-
-
-  isAnalyzing = false;
-
-  updateToggleButton();
-
-  persistAnalysisState(false);
-
-  teardownTweetProcessing();
-
-
-
-  const finalMessage = isScraping
-
-    ? `${message} Scraping remains active.`
-
-    : message;
-
-  showPanelStatus(finalMessage, 'info');
-
-  console.log('Tweet analysis paused.');
-
-}
 
 
 function updateToggleButton() {
@@ -1160,9 +1121,9 @@ function updateToggleButton() {
 
 
 
-  if (isAnalyzing) {
+  if (isCapturing) {
 
-    panelState.toggleButton.textContent = 'Pause Analysis';
+    panelState.toggleButton.textContent = 'Pause Capture';
 
     panelState.toggleButton.classList.add('is-active');
 
@@ -1170,7 +1131,7 @@ function updateToggleButton() {
 
   } else {
 
-    panelState.toggleButton.textContent = 'Start Analysis';
+    panelState.toggleButton.textContent = 'Start Capture';
 
     panelState.toggleButton.classList.remove('is-active');
 
@@ -1244,15 +1205,8 @@ function setupTweetObserver() {
 
 
 
-        const tweetElement = node.querySelector
+        const tweetElement = node.querySelector ? node.querySelector('[data-testid=tweet]') : node.matches && node.matches('[data-testid=tweet]') ? node : null;
 
-          ? node.querySelector('[data-testid="tweet"]')
-
-          : node.matches && node.matches('[data-testid="tweet"]')
-
-            ? node
-
-            : null;
 
 
 
@@ -1272,6 +1226,29 @@ function setupTweetObserver() {
 
   tweetObserver.observe(document.body, { childList: true, subtree: true });
 
+}
+
+
+
+function ensureScanInterval() {
+  if (scanIntervalId) {
+    return;
+  }
+
+  scanIntervalId = setInterval(() => {
+    if (isProcessingActive()) {
+      processVisibleTweets();
+    }
+  }, SCAN_INTERVAL_MS);
+}
+
+function clearScanInterval() {
+  if (!scanIntervalId) {
+    return;
+  }
+
+  clearInterval(scanIntervalId);
+  scanIntervalId = null;
 }
 
 
@@ -1310,40 +1287,41 @@ function sendRuntimeMessage(payload) {
 
 async function processTweet(tweetElement) {
 
+  const tweetData = extractTweetData(tweetElement);
+
+  if (!tweetData) {
+
+    return;
+
+  }
+
+
+
+  const shouldStore = isCapturing;
+
+  if (!shouldStore) {
+
+    return;
+
+  }
+
+
+
+  const tweetId = tweetData.id;
+
+  if (processedTweets.has(tweetId) || processingTweets.has(tweetId)) {
+
+    return;
+
+  }
+
+
+
+  processingTweets.add(tweetId);
+
+  let captureComplete = false;
+
   try {
-
-    const tweetData = extractTweetData(tweetElement);
-
-    if (!tweetData) {
-
-      return;
-
-    }
-
-
-
-    const shouldAnalyze = isAnalyzing;
-    const shouldStore = isScraping;
-
-    if (!shouldAnalyze && !shouldStore) {
-
-      return;
-
-    }
-
-
-
-    if (processedTweets.has(tweetData.id)) {
-
-      return;
-
-    }
-
-
-
-    processedTweets.add(tweetData.id);
-
-
 
     console.log('Processing tweet:', tweetData.text.substring(0, 80));
 
@@ -1357,7 +1335,7 @@ async function processTweet(tweetElement) {
 
       options: {
 
-        analyze: shouldAnalyze,
+        analyze: false,
 
         store: shouldStore
 
@@ -1369,37 +1347,21 @@ async function processTweet(tweetElement) {
 
     if (response && response.success) {
 
-      if (shouldAnalyze) {
+      const stored = shouldStore ? Boolean(response.stored) : true;
 
-        if (response.analysis) {
+      if (stored) {
 
-          console.log('Tweet analysis completed:', response.analysis);
+        finalizeTweetCapture(tweetData);
 
-          addAnalysisResult(tweetData, response.analysis);
+        captureComplete = true;
 
-        } else {
+      } else {
 
-          console.warn('Analysis requested but not returned for tweet:', tweetData.id);
+        console.warn('Storage requested but not confirmed for tweet:', tweetId);
 
-          showPanelStatus('Analysis unavailable for this tweet.', 'error');
+        trackProcessedTweetId(tweetId);
 
-        }
-
-      }
-
-
-
-      if (shouldStore) {
-
-        if (response.stored) {
-
-          console.log('Tweet stored successfully.');
-
-        } else {
-
-          console.warn('Storage requested but not confirmed for tweet:', tweetData.id);
-
-        }
+        captureComplete = true;
 
       }
 
@@ -1417,33 +1379,29 @@ async function processTweet(tweetElement) {
 
     }
 
-
-
-    stats.tweetsProcessed += 1;
-
-    stats.accountsAnalyzed.add(tweetData.user.username);
-
-
-
-    chrome.storage.local.set({
-
-      tweetsProcessed: stats.tweetsProcessed,
-
-      accountsAnalyzed: stats.accountsAnalyzed.size
-
-    });
-
-
-
-    chrome.runtime.sendMessage({ action: 'updateStats' });
-
-    updateStatsDisplay();
-
   } catch (error) {
 
     console.error('Error processing tweet:', error);
 
     showPanelStatus(error.message || 'Unexpected error while processing tweet.', 'error');
+
+  } finally {
+
+    processingTweets.delete(tweetId);
+
+    if (!captureComplete) {
+
+      processedTweets.delete(tweetId);
+
+      const idx = processedTweetOrder.indexOf(tweetId);
+
+      if (idx !== -1) {
+
+        processedTweetOrder.splice(idx, 1);
+
+      }
+
+    }
 
   }
 
@@ -1451,9 +1409,37 @@ async function processTweet(tweetElement) {
 
 
 
-function addAnalysisResult(tweetData, analysis) {
+function finalizeTweetCapture(tweetData) {
 
-  if (!panelState.results) {
+  trackProcessedTweetId(tweetData.id);
+
+
+
+  stats.tweetsProcessed += 1;
+
+  stats.accountsAnalyzed.add(tweetData.user.username);
+
+
+
+  chrome.storage.local.set({
+
+    tweetsProcessed: stats.tweetsProcessed,
+
+    accountsAnalyzed: stats.accountsAnalyzed.size
+
+  });
+
+
+
+  chrome.runtime.sendMessage({ action: 'updateStats' });
+
+  updateStatsDisplay();
+
+}
+
+function trackProcessedTweetId(tweetId) {
+
+  if (!tweetId) {
 
     return;
 
@@ -1461,91 +1447,25 @@ function addAnalysisResult(tweetData, analysis) {
 
 
 
-  const redFlags = Array.isArray(analysis.red_flags)
+  if (!processedTweets.has(tweetId)) {
 
-    ? analysis.red_flags
+    processedTweets.add(tweetId);
 
-    : analysis.red_flags
-
-    ? [analysis.red_flags]
-
-    : [];
-
-
-
-  const item = document.createElement('div');
-
-  item.className = 'xca-result';
-
-
-
-  const header = document.createElement('div');
-
-  header.className = 'xca-result-header';
-
-  header.innerHTML = `
-
-    <span>@${sanitizeText(tweetData.user.username)}</span>
-
-    <span>Toxicity ${Number(analysis.toxicity_score ?? 0).toFixed(1)}/10 � Bot ${Number(analysis.bot_likelihood ?? 0).toFixed(1)}/10</span>
-
-  `;
-
-
-
-  const text = document.createElement('div');
-
-  text.className = 'xca-result-text';
-
-  text.textContent = tweetData.text;
-
-
-
-  const analysisSummary = document.createElement('div');
-
-  analysisSummary.className = 'xca-result-analysis';
-
-  analysisSummary.textContent = analysis.analysis || 'No analysis summary provided.';
-
-
-
-  item.appendChild(header);
-
-  item.appendChild(text);
-
-  item.appendChild(analysisSummary);
-
-
-
-  if (redFlags.length > 0) {
-
-    const flags = document.createElement('div');
-
-    flags.className = 'xca-result-flags';
-
-    flags.textContent = `Red flags: ${redFlags.join(', ')}`;
-
-    item.appendChild(flags);
+    processedTweetOrder.push(tweetId);
 
   }
 
 
 
-  if (panelState.results.querySelector('.xca-empty')) {
+  while (processedTweetOrder.length > PROCESSED_TWEET_LIMIT) {
 
-    panelState.results.innerHTML = '';
+    const oldest = processedTweetOrder.shift();
 
-  }
+    if (oldest) {
 
+      processedTweets.delete(oldest);
 
-
-  panelState.results.prepend(item);
-
-
-
-  while (panelState.results.children.length > 20) {
-
-    panelState.results.removeChild(panelState.results.lastElementChild);
+    }
 
   }
 
@@ -1561,7 +1481,7 @@ function sanitizeText(value) {
 
 
 
-function askQuestion(query) {
+function askQuestion(request = {}) {
 
   if (!panelState.askButton || !panelState.answer) {
 
@@ -1571,15 +1491,71 @@ function askQuestion(query) {
 
 
 
+  const payload = typeof request === 'string'
+
+    ? { query: request }
+
+    : Object.assign({ query: '' }, request);
+
+
+
+  const query = (payload.query || '').trim();
+
+
+
+  if (!query) {
+
+    showPanelStatus('Enter a question to query captured tweets.', 'info');
+
+    return;
+
+  }
+
+
+
+  const options = getPanelQueryOptions();
+
+  const includeKeywords = Array.isArray(payload.includeKeywords) && payload.includeKeywords.length
+
+    ? payload.includeKeywords
+
+    : options.includeKeywords;
+
+  const excludeKeywords = Array.isArray(payload.excludeKeywords) && payload.excludeKeywords.length
+
+    ? payload.excludeKeywords
+
+    : options.excludeKeywords;
+
+  const maxResults = Number.isFinite(payload.maxResults)
+
+    ? payload.maxResults
+
+    : options.maxResults;
+
+
+
   panelState.askButton.disabled = true;
 
   panelState.askButton.textContent = 'Asking...';
 
-  showPanelStatus('Querying analyzed tweets...', 'info');
+  showPanelStatus('Searching captured tweets...', 'info');
 
 
 
-  sendRuntimeMessage({ action: 'askQuestion', query })
+  sendRuntimeMessage({
+
+    action: 'askQuestion',
+
+    query,
+
+    includeKeywords,
+
+    excludeKeywords,
+
+    maxResults
+
+  })
 
     .then((response) => {
 
@@ -1599,9 +1575,13 @@ function askQuestion(query) {
 
       renderAnswer(response);
 
-      panelState.questionInput.value = '';
+      if (panelState.questionInput) {
 
-      showPanelStatus('Answer generated from analyzed tweets.', 'success');
+        panelState.questionInput.value = '';
+
+      }
+
+      showPanelStatus('Answer generated from captured tweets.', 'success');
 
     })
 
@@ -1670,56 +1650,110 @@ function renderAnswer(result) {
 
 
 function updateStatsDisplay() {
+  // Update from local stats first
+  if (panelState.tweetCount) {
+    panelState.tweetCount.textContent = stats.tweetsProcessed;
+  }
 
+  if (panelState.accountCount) {
+    panelState.accountCount.textContent = stats.accountsAnalyzed.size;
+  }
+
+  // Then sync with storage
   chrome.storage.local.get(['tweetsProcessed', 'accountsAnalyzed'], (data) => {
-
     if (typeof data.tweetsProcessed === 'number') {
-
       stats.tweetsProcessed = data.tweetsProcessed;
-
     }
-
-
 
     if (panelState.tweetCount) {
-
       panelState.tweetCount.textContent = stats.tweetsProcessed;
-
     }
 
-
-
     const accountCountValue = typeof data.accountsAnalyzed === 'number'
-
       ? data.accountsAnalyzed
-
       : stats.accountsAnalyzed.size;
 
-
-
     if (panelState.accountCount) {
-
       panelState.accountCount.textContent = accountCountValue;
+    }
+  });
+}
+
+
+
+function normalizeTweetText(text) {
+
+  return (text || '')
+
+    .replace(/\u00A0/g, ' ')
+
+    .replace(/\r\n/g, '\n')
+
+    .replace(/\t/g, ' ')
+
+    .replace(/[ ]{2,}/g, ' ')
+
+    .replace(/\n{3,}/g, '\n\n')
+
+    .split('\n')
+
+    .map((line) => line.trim())
+
+    .join('\n')
+
+    .trim();
+
+}
+
+
+function getTweetTextContent(tweetElement) {
+
+  if (!tweetElement || typeof tweetElement.querySelector !== 'function') {
+
+    return '';
+
+  }
+
+
+  const textElement = tweetElement.querySelector('[data-testid="tweetText"]');
+
+  if (!textElement) {
+
+    return '';
+
+  }
+
+
+  const fragment = textElement.cloneNode(true);
+
+
+  const showMoreButtons = fragment.querySelectorAll("button[data-testid='tweet-text-show-more-link']");
+
+  showMoreButtons.forEach((button) => {
+
+    if (button && button.parentNode) {
+
+      button.parentNode.removeChild(button);
 
     }
 
   });
 
-}
 
+  const rawText = fragment.textContent || '';
+
+  return normalizeTweetText(rawText);
+
+}
 
 
 function extractTweetData(tweetElement) {
 
   try {
 
-    const textElement = tweetElement.querySelector('[data-testid="tweetText"]');
+    const text = getTweetTextContent(tweetElement);
 
-    if (!textElement) return null;
-
-
-
-    const text = textElement.innerText;
+    if (!text) return null;
 
 
 
@@ -1861,79 +1895,34 @@ function extractNumber(text) {
 
 }
 
-
-
-function extractTweetData(tweetElement) {
-  try {
-    const textElement = tweetElement.querySelector('[data-testid="tweetText"]');
-    if (!textElement) return null;
-
-    const text = textElement.innerText;
-
-    const userElement = tweetElement.querySelector('[data-testid="User-Name"]');
-    if (!userElement) return null;
-
-    const usernameElement = userElement.querySelector('a');
-    const username = usernameElement ? usernameElement.href.split('/').pop() : 'unknown';
-
-    const displayNameElement = userElement.querySelector('span');
-    const displayName = displayNameElement ? displayNameElement.innerText : username;
-
-    const likeButton = tweetElement.querySelector('[data-testid="like"]');
-    const retweetButton = tweetElement.querySelector('[data-testid="retweet"]');
-    const replyButton = tweetElement.querySelector('[data-testid="reply"]');
-
-    const likes = likeButton ? extractNumber(likeButton.getAttribute('aria-label')) : 0;
-    const retweets = retweetButton ? extractNumber(retweetButton.getAttribute('aria-label')) : 0;
-    const replies = replyButton ? extractNumber(replyButton.getAttribute('aria-label')) : 0;
-
-    const timeElement = tweetElement.querySelector('time');
-    const timestamp = timeElement ? timeElement.getAttribute('datetime') : new Date().toISOString();
-
-    // Use realistic defaults instead of trying to extract follower/following counts
-    // This prevents false positives from missing data
-    const followersCount = Math.floor(Math.random() * 10000) + 100; // Random between 100-10100
-    const followingCount = Math.floor(Math.random() * 1000) + 50;   // Random between 50-1050
-    const accountAge = Math.floor(Math.random() * 365) + 30;        // Random between 30-395 days
-
-    return {
-      id: `${username}_${timestamp}`,
-      text,
-      timestamp,
-      likes,
-      retweets,
-      replies,
-      user: {
-        username,
-        displayName,
-        followersCount,
-        followingCount,
-        accountAge
-      }
-    };
-  } catch (error) {
-    console.error('Error extracting tweet data:', error);
-    return null;
+function calculateAccountAge(tweetElement) {
+  const timeElement = tweetElement ? tweetElement.querySelector('time') : null;
+  if (!timeElement) {
+    return 0;
   }
+
+  const datetime = timeElement.getAttribute('datetime');
+  if (!datetime) {
+    return 0;
+  }
+
+  const tweetDate = new Date(datetime);
+  if (Number.isNaN(tweetDate.getTime())) {
+    return 0;
+  }
+
+  const now = Date.now();
+  const ageInMs = now - tweetDate.getTime();
+  if (ageInMs <= 0) {
+    return 0;
+  }
+
+  return Math.floor(ageInMs / (1000 * 60 * 60 * 24));
 }
 
 
 
-function processVisibleTweets() {
 
-  if (!isProcessingActive()) {
-
-    return;
-
-  }
-
-  const tweetElements = document.querySelectorAll('[data-testid="tweet"]');
-  console.log(`Found ${tweetElements.length} tweets on page`);
-  
-  tweetElements.forEach(tweetElement => {
-    processTweet(tweetElement);
-  });
-}
 
 function startTweetMonitoring() {
   if (document.readyState === 'loading') {
@@ -1950,4 +1939,3 @@ function startTweetMonitoring() {
 
 
 init();
-

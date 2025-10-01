@@ -128,23 +128,20 @@ function parseJSONResponse(content) {
 
 // Initialize ChromaDB collection
 async function initializeCollection() {
+  const chromaUrl = process.env.CHROMA_URL || 'http://localhost:8000';
+
   try {
-    // Use embedded ChromaDB (no server required)
-    chroma = new ChromaClient({
-      path: "./chroma_db" // Local embedded database
-    });
-    
-    // Try to get existing collection
-    collection = await chroma.getCollection({ name: "x_tweets" });
-    console.log("Connected to existing collection");
+    chroma = new ChromaClient({ path: chromaUrl });
+    collection = await chroma.getCollection({ name: 'x_tweets' });
+    console.log('Connected to existing collection at', chromaUrl);
   } catch (error) {
-    console.log("Creating new collection...");
-    // Create new collection if it doesn't exist
+    console.warn('Unable to get collection, creating a new one...', error.message);
+    chroma = chroma || new ChromaClient({ path: chromaUrl });
     collection = await chroma.createCollection({
-      name: "x_tweets",
-      metadata: { "description": "X.com tweets with embeddings" }
+      name: 'x_tweets',
+      metadata: { description: 'X.com tweets with embeddings' }
     });
-    console.log("Created new collection");
+    console.log('Created new collection at', chromaUrl);
   }
 }
 

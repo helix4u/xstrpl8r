@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "X.com AI Analyzer",
+  "name": "X.com Story Explorer",
   "version": "1.0.0",
-  "description": "AI-powered X.com tweet analysis with vector database storage and toxicity scoring",
+  "description": "Capture narrative context from the tweets you read and ask questions about the stories that unfold",
   "permissions": [
     "activeTab",
     "storage",
@@ -34,7 +34,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "X.com AI Analyzer",
+    "default_title": "X.com Story Explorer",
     "default_icon": {
       "16": "icon.svg",
       "32": "icon.svg",

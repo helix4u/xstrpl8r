@@ -3,6 +3,7 @@ const cors = require('cors');
 const { ChromaClient } = require('chromadb');
 const OpenAI = require('openai');
 const axios = require('axios');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = 3001;
@@ -17,6 +18,21 @@ let chroma = null;
 let collection = null;
 let openai = null;
 let openaiConfig = { apiKey: null, baseURL: null };
+
+// Basic text normalizer + hash for dedupe
+function normalizeText(text) {
+  if (!text) return '';
+  return String(text)
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, '') // strip URLs
+    .replace(/\s+/g, ' ')             // collapse whitespace
+    .trim();
+}
+
+function hashText(text) {
+  const norm = normalizeText(text);
+  return crypto.createHash('sha1').update(norm).digest('hex');
+}
 
 function sanitizeBaseURL(baseURL) {
   const defaultBase = 'https://api.openai.com/v1';
@@ -278,6 +294,30 @@ app.post('/api/store-tweet', async (req, res) => {
     let metadataSummary = null;
 
     if (shouldStore) {
+      // Build a stable ID for dedupe: prefer tweet id; else hash of normalized text
+      const textHash = hashText(tweet.text || '');
+      const stableId = tweet.id ? `tweet_${tweet.id}` : `text_${textHash}`;
+
+      // Check for existing doc by ID to avoid duplicates
+      try {
+        const existing = await collection.get({ ids: [stableId] });
+        const alreadyExists = existing && Array.isArray(existing.ids) && existing.ids.length > 0;
+        if (alreadyExists) {
+          const message = shouldAnalyze
+            ? 'Duplicate tweet skipped (analysis returned).'
+            : 'Duplicate tweet skipped.';
+          return res.json({
+            success: true,
+            analysis: shouldAnalyze ? analysis : null,
+            stored: false,
+            metadata: null,
+            message
+          });
+        }
+      } catch (e) {
+        // If get-by-id is not supported, continue without failing
+      }
+
       const embedding = await generateEmbedding(tweet.text);
 
       const storedAt = new Date().toISOString();
@@ -295,6 +335,7 @@ app.post('/api/store-tweet', async (req, res) => {
         author: userInfo.username,
         displayName: userInfo.displayName,
         tweetId: tweet.id || null,
+        textHash: textHash,
         tweetedAt: tweetTimestamp,
         scrapedAt: storedAt,
         timestamp: tweetTimestamp,
@@ -311,7 +352,7 @@ app.post('/api/store-tweet', async (req, res) => {
       };
 
       await collection.add({
-        ids: [`tweet_${Date.now()}_${Math.random()}`],
+        ids: [stableId],
         embeddings: [embedding],
         metadatas: [metadata],
         documents: [tweet.text]
@@ -351,39 +392,102 @@ app.post('/api/store-tweet', async (req, res) => {
 // Query tweets using RAG
 app.post('/api/query', async (req, res) => {
   try {
-    const { query, apiKey, baseURL, model } = req.body;
+    const { query, apiKey, baseURL, model, maxResults, dedupe } = req.body;
     
     initializeOpenAI(apiKey, baseURL);
 
     // Generate query embedding
     const queryEmbedding = await generateEmbedding(query);
     
-    // Search similar tweets
-    const results = await collection.query({
-      queryEmbeddings: [queryEmbedding],
-      nResults: 10
-    });
+    // Configure requested size and dedupe behavior
+    const target = Number.isFinite(Number(maxResults)) && Number(maxResults) > 0
+      ? Math.floor(Number(maxResults))
+      : 10;
+    const doDedupe = dedupe !== false; // default true
 
-    const documents = (results.documents && results.documents[0]) || [];
-    const metadatas = (results.metadatas && results.metadatas[0]) || [];
+    let filtered = [];
 
-    if (!documents.length) {
-      return res.json({
-        success: false,
-        answer: '',
-        sources: [],
-        totalResults: 0,
-        error: 'No tweets matched your query yet. Try analyzing more tweets first.'
+    if (!doDedupe) {
+      // No dedupe: return exactly target in rank order
+      const results = await collection.query({
+        queryEmbeddings: [queryEmbedding],
+        nResults: target
       });
+      const documents = (results.documents && results.documents[0]) || [];
+      const metadatas = (results.metadatas && results.metadatas[0]) || [];
+
+      if (!documents.length) {
+        return res.json({
+          success: false,
+          answer: '',
+          sources: [],
+          totalResults: 0,
+          error: 'No tweets matched your query yet. Try analyzing more tweets first.'
+        });
+      }
+
+      filtered = documents.map((doc, i) => ({ doc, meta: metadatas[i] || {} })).slice(0, target);
+    } else {
+      // Dedupe by tweetId/textHash/result id, no author caps; fill to target
+      let k = Math.max(target, Math.min(2 * target, 50));
+      const maxK = Math.min(target * 5, 500);
+      const seenTweetIds = new Set();
+      const seenHashes = new Set();
+      const seenGenericIds = new Set();
+
+      while (true) {
+        const results = await collection.query({
+          queryEmbeddings: [queryEmbedding],
+          nResults: k
+        });
+
+        const documents = (results.documents && results.documents[0]) || [];
+        const metadatas = (results.metadatas && results.metadatas[0]) || [];
+        const ids = (results.ids && results.ids[0]) || [];
+
+        for (let i = 0; i < documents.length && filtered.length < target; i++) {
+          const doc = documents[i];
+          const meta = metadatas[i] || {};
+          const rid = ids[i];
+
+          const textHash = meta.textHash || hashText(meta.text || doc || '');
+          const tweetId = meta.tweetId ? String(meta.tweetId) : null;
+          const genericId = rid ? String(rid) : null;
+
+          if (tweetId && seenTweetIds.has(tweetId)) continue;
+          if (textHash && seenHashes.has(textHash)) continue;
+          if (!tweetId && !textHash && genericId && seenGenericIds.has(genericId)) continue;
+
+          if (tweetId) seenTweetIds.add(tweetId);
+          if (textHash) seenHashes.add(textHash);
+          if (!tweetId && !textHash && genericId) seenGenericIds.add(genericId);
+
+          filtered.push({ doc, meta });
+        }
+
+        if (filtered.length >= target) break;
+        if (documents.length < k) break; // not enough items in the DB
+        if (k >= maxK) break;
+        k = Math.min(k + target, maxK);
+      }
+
+      if (!filtered.length) {
+        return res.json({
+          success: false,
+          answer: '',
+          sources: [],
+          totalResults: 0,
+          error: 'No tweets matched your query yet. Try analyzing more tweets first.'
+        });
+      }
+      filtered = filtered.slice(0, target);
     }
 
     // Prepare context from results
-    const context = documents.map((doc, index) => {
-      const metadata = metadatas[index] || {};
-      const tweetedAt = metadata.tweetedAt || metadata.timestamp || 'Unknown';
-      const scrapedAt = metadata.scrapedAt || 'Unknown';
-      // Drop toxicity/bot lines from the context; keep only essentials
-      return `Tweet: ${doc}\nAuthor: @${metadata.author}\nTweeted At: ${tweetedAt}\nScraped At: ${scrapedAt}\n`;
+    const context = filtered.map(({ doc, meta }) => {
+      const tweetedAt = meta.tweetedAt || meta.timestamp || 'Unknown';
+      const scrapedAt = meta.scrapedAt || 'Unknown';
+      return `Tweet: ${doc}\nAuthor: @${meta.author}\nTweeted At: ${tweetedAt}\nScraped At: ${scrapedAt}\n`;
     }).join('\n');
 
     // Generate answer using RAG
@@ -410,7 +514,7 @@ Provide a comprehensive answer based on the tweet data. Include relevant statist
     const answer = answerContent || '';
     
     // Extract sources
-    const sources = metadatas.map((meta = {}) => {
+    const sources = filtered.map(({ meta }) => {
       const snippet = (meta.text || '').substring(0, 100);
       const tweetedAt = meta.tweetedAt || meta.timestamp || 'unknown date';
       return `@${meta.author}: "${snippet}..." (tweeted ${tweetedAt})`;
@@ -420,7 +524,7 @@ Provide a comprehensive answer based on the tweet data. Include relevant statist
       success: true,
       answer,
       sources,
-      totalResults: documents.length
+      totalResults: filtered.length
     });
   } catch (error) {
     const message = buildOpenAIErrorMessage(error);
